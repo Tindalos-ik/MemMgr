@@ -39,9 +39,7 @@ def snapshot_application_code() -> dict[str, str]:
     }
 
 
-def prepare_run_files(
-    run_dir: Path, config: dict, tier: str, dataset: Path
-) -> None:
+def prepare_run_files(run_dir: Path, config: dict, tier: str, dataset: Path) -> None:
     """在新运行目录保存配置、环境、源码、依赖和数据ID快照。
 
     同时创建空的请求与失败记录文件，保持索引运行目录的标准结构。
@@ -50,8 +48,10 @@ def prepare_run_files(
     environment = {
         "python": sys.version,
         "tier": tier,
-        "server_config": json.loads(
-            Path("config/server.json").read_text()
+        "server_config": (
+            config["_web_snapshot"]["server"]
+            if "_web_snapshot" in config
+            else json.loads(Path("config/server.json").read_text())
         ),
     }
     (run_dir / "env.json").write_text(json.dumps(environment, indent=2))
@@ -95,9 +95,9 @@ def resolve_collection(
         int(embedding["chunk_tokens"]),
         int(embedding["chunk_overlap"]),
     )
-    digest = hashlib.sha256(
-        json.dumps(identity, sort_keys=True).encode()
-    ).hexdigest()[:12]
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[
+        :12
+    ]
     collection = index_collection_name(
         config["chroma"]["collection_prefix"], tier, digest
     )
@@ -114,8 +114,7 @@ def main() -> None:
     args = parse_args()
     config = json.loads(Path(args.config).read_text())
     run_name = (
-        f"index-{args.tier}-{time.strftime('%Y%m%d-%H%M%S')}-"
-        f"{uuid.uuid4().hex[:8]}"
+        f"index-{args.tier}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     )
     run_dir = Path(config["experiment"]["output_dir"]) / run_name
     run_dir.mkdir(parents=True)
@@ -123,7 +122,9 @@ def main() -> None:
     prepare_run_files(run_dir, config, args.tier, dataset)
     collection, manifest, reused = resolve_collection(config, args.tier, dataset)
 
-    registry_path = Path(".agent/state/index-run-registry.json")
+    registry_path = Path(
+        config.get("_index_registry_path", ".agent/state/index-run-registry.json")
+    )
     registry = json.loads(registry_path.read_text()) if registry_path.exists() else {}
     stop_sampling = threading.Event()
     sampler = threading.Thread(

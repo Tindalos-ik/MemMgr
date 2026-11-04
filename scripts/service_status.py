@@ -5,6 +5,8 @@
 `.agent/state/service-status.json` 并同时打印到标准输出。
 """
 
+import asyncio
+import sys
 import datetime
 import json
 import time
@@ -13,6 +15,10 @@ from pathlib import Path
 import chromadb
 import httpx
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from memmgr.service_status import health_snapshot
+from memmgr.web_config import configs
+
 
 def main() -> None:
     """采集本机服务状态和集合计数，并保存一份带耗时的 JSON 快照。
@@ -20,6 +26,10 @@ def main() -> None:
     计时从创建 Chroma 客户端前开始；HTTP 健康检查沿用 10 秒超时。
     """
     started = time.monotonic()
+    service_health = asyncio.run(health_snapshot(configs()["baseline"]))
+    for name, status in service_health.items():
+        if status["status"] != "ok":
+            raise RuntimeError(f"{name}: {status['error']}")
     chroma = chromadb.HttpClient(host="127.0.0.1", port=8001)
     collections = []
 
@@ -41,12 +51,11 @@ def main() -> None:
         "chroma_heartbeat": chroma.heartbeat(),
         "collections": collections,
         "mutated_data": False,
+        "services": service_health,
     }
     output = Path(".agent/state/service-status.json")
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(
-        json.dumps(result, indent=2) + "\n"
-    )
+    output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
 
 

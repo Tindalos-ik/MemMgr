@@ -55,9 +55,7 @@ def stats(values: list[int | float]) -> dict:
     }
 
 
-def command_run_paths(
-    execution_dir: Path, command: dict
-) -> tuple[Path, list[Path]]:
+def command_run_paths(execution_dir: Path, command: dict) -> tuple[Path, list[Path]]:
     """优先读取命令清单的运行目录，缺省时从私有目录的日志行取得路径。"""
     log_path = execution_dir / f"{command['label']}.log"
     if command.get("run_directory"):
@@ -71,19 +69,18 @@ def command_run_paths(
 
 
 def collect_request_metrics(
-    run_dir: Path, result: dict, cases: list[dict]
+    run_dir: Path, result: dict, cases: list[dict], allow_missing_batches: bool = False
 ) -> None:
     """汇总逐请求指标、repeat批次与符合条件的回答样例。
 
     正式请求按status为ok计入成功统计；warmup单列在phase统计中。
     就地更新 result 的指标字段，并向 cases 追加符合条件的回答样例。
+    allow_missing_batches 为真时显式记录中断运行缺失的批次文件，吞吐保持 None。
     """
     request_path = run_dir / "requests.jsonl"
     all_rows = [json.loads(line) for line in request_path.read_text().splitlines()]
     formal_rows = [row for row in all_rows if row.get("phase") == "formal"]
-    successful_rows = [
-        row for row in formal_rows if row.get("status") == "ok"
-    ]
+    successful_rows = [row for row in formal_rows if row.get("status") == "ok"]
     repeats = sorted({row["repeat"] for row in formal_rows})
     result.update(
         requests=len(formal_rows),
@@ -100,11 +97,7 @@ def collect_request_metrics(
     )
     result["metrics"] = {
         metric: stats(
-            [
-                row[metric]
-                for row in successful_rows
-                if row.get(metric) is not None
-            ]
+            [row[metric] for row in successful_rows if row.get(metric) is not None]
         )
         for metric in REQUEST_METRICS
     }
@@ -124,7 +117,9 @@ def collect_request_metrics(
     result["phase_metrics"] = summarize_request_phases(
         all_rows, formal_rows, successful_rows, repeats
     )
-    collect_batch_metrics(run_dir, formal_rows, successful_rows, repeats, result)
+    collect_batch_metrics(
+        run_dir, formal_rows, successful_rows, repeats, result, allow_missing_batches
+    )
     collect_answer_cases(successful_rows, cases)
 
 
@@ -149,9 +144,7 @@ def summarize_request_phases(
     phases = {
         "warmup": [row for row in all_rows if row.get("phase") == "warmup"],
         "first_logged_completion_per_repeat": [
-            row
-            for row in successful_rows
-            if row.get("request_id") in first_request_ids
+            row for row in successful_rows if row.get("request_id") in first_request_ids
         ],
         "remaining_formal_requests": [
             row
@@ -162,11 +155,7 @@ def summarize_request_phases(
     return {
         phase: {
             metric: stats(
-                [
-                    row[metric]
-                    for row in phase_rows
-                    if row.get(metric) is not None
-                ]
+                [row[metric] for row in phase_rows if row.get(metric) is not None]
             )
             for metric in REQUEST_METRICS
         }
@@ -180,19 +169,20 @@ def collect_batch_metrics(
     successful_rows: list[dict],
     repeats: list[int],
     result: dict,
+    allow_missing: bool = False,
 ) -> None:
     """按repeat wall记录复算成功吞吐、尝试吞吐和服务端输出token速率。"""
+    result["missing_batch_files"] = []
     batches = []
     for repeat in repeats:
         repeat_path = run_dir / f"repeat-{repeat}.json"
+        if allow_missing and not repeat_path.exists():
+            result["missing_batch_files"].append(str(repeat_path))
+            continue
         repeat_record = json.loads(repeat_path.read_text())
         wall_seconds = repeat_record["wall_seconds"]
-        attempted_rows = [
-            row for row in formal_rows if row["repeat"] == repeat
-        ]
-        completed_rows = [
-            row for row in attempted_rows if row["status"] == "ok"
-        ]
+        attempted_rows = [row for row in formal_rows if row["repeat"] == repeat]
+        completed_rows = [row for row in attempted_rows if row["status"] == "ok"]
         actual_output_tokens = sum(
             row.get("output_tokens_server") or 0 for row in completed_rows
         )
@@ -200,9 +190,7 @@ def collect_batch_metrics(
             {
                 "repeat": repeat,
                 "source": str(repeat_path),
-                "source_sha256": hashlib.sha256(
-                    repeat_path.read_bytes()
-                ).hexdigest(),
+                "source_sha256": hashlib.sha256(repeat_path.read_bytes()).hexdigest(),
                 "wall_seconds": wall_seconds,
                 "attempts": len(attempted_rows),
                 "successes": len(completed_rows),
@@ -222,20 +210,23 @@ def collect_batch_metrics(
     result["batches"] = batches
 
     total_wall_seconds = sum(batch["wall_seconds"] for batch in batches)
-    result["batch_aggregate"] = {
-        "wall_seconds": total_wall_seconds,
-        "success_rps": len(successful_rows) / total_wall_seconds,
-        "attempt_rps": len(formal_rows) / total_wall_seconds,
-        "server_output_tokens_per_second": (
-            sum(batch["output_tokens_server_actual"] for batch in batches)
-            / total_wall_seconds
-            if any(
-                row.get("output_tokens_server") is not None
-                for row in successful_rows
-            )
-            else None
-        ),
-    }
+    if result["missing_batch_files"] or total_wall_seconds == 0:
+        result["batch_aggregate"] = None
+    else:
+        result["batch_aggregate"] = {
+            "wall_seconds": total_wall_seconds,
+            "success_rps": len(successful_rows) / total_wall_seconds,
+            "attempt_rps": len(formal_rows) / total_wall_seconds,
+            "server_output_tokens_per_second": (
+                sum(batch["output_tokens_server_actual"] for batch in batches)
+                / total_wall_seconds
+                if any(
+                    row.get("output_tokens_server") is not None
+                    for row in successful_rows
+                )
+                else None
+            ),
+        }
     for metric in [
         "wall_seconds",
         "success_rps",
@@ -281,9 +272,7 @@ def collect_resource_summary(run_dir: Path, result: dict) -> None:
         return
 
     # 沿用既有统计口径，跳过资源记录的第一行。
-    samples = [
-        json.loads(line) for line in resource_path.read_text().splitlines()
-    ][1:]
+    samples = [json.loads(line) for line in resource_path.read_text().splitlines()][1:]
     gpu_samples = []
     for sample in samples:
         try:
@@ -298,6 +287,25 @@ def collect_resource_summary(run_dir: Path, result: dict) -> None:
 
     resources = {
         "samples": len(samples),
+        "gpu_samples": len(gpu_samples),
+        "cpu_percent": stats(
+            [
+                sample["cpu_percent"]
+                for sample in samples
+                if isinstance(sample.get("cpu_percent"), (int, float))
+            ]
+        ),
+        "timestamp_first_unix_seconds": next(
+            (sample["timestamp"] for sample in samples if "timestamp" in sample), None
+        ),
+        "timestamp_last_unix_seconds": next(
+            (
+                sample["timestamp"]
+                for sample in reversed(samples)
+                if "timestamp" in sample
+            ),
+            None,
+        ),
         "gpu_device_total_mib": gpu_samples[0][0] if gpu_samples else None,
         "gpu_device_used_max_mib": max(
             (sample[1] for sample in gpu_samples), default=None
@@ -405,9 +413,7 @@ def collect_command_result(
     if request_path.exists() and request_path.stat().st_size:
         collect_request_metrics(run_dir, result, cases)
     elif (run_dir / "summary.json").exists():
-        result["index_summary"] = json.loads(
-            (run_dir / "summary.json").read_text()
-        )
+        result["index_summary"] = json.loads((run_dir / "summary.json").read_text())
 
     collect_resource_summary(run_dir, result)
     return result
@@ -506,9 +512,7 @@ def write_import_summaries(results: list[dict]) -> None:
             summary_path = Path(run_path) / "summary.json"
             if summary_path.exists():
                 summary = json.loads(summary_path.read_text())
-                if collection in formal_collections and not summary.get(
-                    "index_reused"
-                ):
+                if collection in formal_collections and not summary.get("index_reused"):
                     imports.append({"source_run": run_path, **summary})
 
     Path(".agent/results/baseline-imports.json").write_text(
@@ -531,16 +535,16 @@ def write_import_summaries(results: list[dict]) -> None:
             "measured_wall_seconds",
             "chunks_per_second",
         ]
-        writer = csv.DictWriter(
-            output, fieldnames=fields, extrasaction="ignore"
-        )
+        writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(imports)
 
 
 def write_batch_summary(results: list[dict]) -> None:
     """写入按repeat记录实际wall与服务端生成token的整批统计CSV。"""
-    with Path(".agent/results/baseline-batch-summary.csv").open("w", newline="") as output:
+    with Path(".agent/results/baseline-batch-summary.csv").open(
+        "w", newline=""
+    ) as output:
         fields = [
             "label",
             "run_directory",
@@ -568,14 +572,11 @@ def write_batch_summary(results: list[dict]) -> None:
                 )
 
 
-def write_outputs(
-    execution_dir: Path, results: list[dict], cases: list[dict]
-) -> None:
+def write_outputs(execution_dir: Path, results: list[dict], cases: list[dict]) -> None:
     """写入复算产生的JSON、CSV和表格文件。"""
     Path(".agent/results").mkdir(parents=True, exist_ok=True)
     Path(".agent/results/baseline-results.json").write_text(
-        json.dumps({"execution": str(execution_dir), "runs": results}, indent=2)
-        + "\n"
+        json.dumps({"execution": str(execution_dir), "runs": results}, indent=2) + "\n"
     )
     Path(".agent/results/baseline-cases.json").write_text(
         json.dumps(cases[:3], indent=2, ensure_ascii=False) + "\n"
@@ -592,8 +593,7 @@ def main() -> None:
     commands = json.loads((execution_dir / "commands.json").read_text())
     cases = []
     results = [
-        collect_command_result(execution_dir, command, cases)
-        for command in commands
+        collect_command_result(execution_dir, command, cases) for command in commands
     ]
     write_outputs(execution_dir, results, cases)
 

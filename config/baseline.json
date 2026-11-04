@@ -1,8 +1,53 @@
 {
-  "dataset": {"root": "data/scifact-baseline", "tiers": {"small": 256, "medium": 1500, "full": 5183}, "seed": 7, "query_count": 30},
-  "embedding": {"model": "BAAI/bge-small-en-v1.5", "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a", "device": "cpu", "batch_size": 16, "chunk_tokens": 384, "chunk_overlap": 32, "query_instruction": "Represent this sentence for searching relevant passages: "},
-  "chroma": {"host": "127.0.0.1", "port": 8001, "collection_prefix": "memmgr"},
-  "llm": {"base_url": "http://127.0.0.1:8000/v1", "model": "Qwen/Qwen2.5-1.5B-Instruct", "tokenizer": "Qwen/Qwen2.5-1.5B-Instruct", "revision": "989aa7980e4cf806f80c7fef2b1adb7bc71aa306", "max_tokens": 128, "max_model_len": 2048, "seed": 7, "temperature": 0, "timeout": 180},
-  "experiment": {"output_dir": ".agent/runs", "top_k": 3, "context_tokens": 1024, "warmups": 1, "repeats": 2, "concurrency": 1, "queries": 8},
-  "resources": {"sample_interval_seconds": 1, "docker_sample_interval_seconds": 5, "chroma_container": "memmgr-chroma-1", "chroma_volume_name": "memmgr_chroma_data", "vllm_pids": [117275]}
+  "dataset": {
+    "root": "data/scifact-baseline",
+    "tiers": {
+      "small": 256,
+      "medium": 1500,
+      "full": 5183
+    },
+    "seed": 7,
+    "query_count": 30
+  },
+  "embedding": {
+    "model": "BAAI/bge-small-en-v1.5",
+    "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+    "device": "cpu",
+    "batch_size": 16,
+    "chunk_tokens": 384,
+    "chunk_overlap": 32,
+    "query_instruction": "Represent this sentence for searching relevant passages: "
+  },
+  "chroma": {
+    "host": "127.0.0.1",
+    "port": 8001,
+    "collection_prefix": "memmgr"
+  },
+  "llm": {
+    "base_url": "http://127.0.0.1:8000/v1",
+    "model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "tokenizer": "Qwen/Qwen2.5-1.5B-Instruct",
+    "revision": "989aa7980e4cf806f80c7fef2b1adb7bc71aa306",
+    "max_tokens": 128,
+    "max_model_len": 2048,
+    "seed": 7,
+    "temperature": 0,
+    "timeout": 180
+  },
+  "experiment": {
+    "output_dir": ".agent/runs",
+    "top_k": 3,
+    "context_tokens": 1024,
+    "warmups": 1,
+    "repeats": 2,
+    "concurrency": 1,
+    "queries": 8
+  },
+  "resources": {
+    "sample_interval_seconds": 1,
+    "docker_sample_interval_seconds": 5,
+    "chroma_container": "memmgr-chroma-1",
+    "chroma_volume_name": "memmgr_chroma_data",
+    "vllm_pids": []
+  }
 }

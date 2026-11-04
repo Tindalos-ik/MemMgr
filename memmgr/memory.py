@@ -1,94 +1,126 @@
-"""提供长期记忆的命名空间隔离和 Chroma 持久化增删改查接口。
-
-集合名由原始命名空间摘要确定；写入与更新采用正文向量，查询采用带检索指令的向量。
-"""
+"""提供长期记忆命名空间隔离、真实向量 CRUD、服务端分页及写后读回验证。"""
 
 from __future__ import annotations
 
 import hashlib
 import uuid
-
 from .index import make_embedder
 
 
 def collection_name(prefix, namespace):
-    """以命名空间 SHA256 的前 24 位建立稳定后缀，裁切前缀后返回符合 63 字符限制的集合名。"""
-    digest = hashlib.sha256(namespace.encode('utf-8')).hexdigest()[:24]
-    suffix = f'_memory_{digest}'
-    return f"{(prefix or 'm')[:63 - len(suffix)]}{suffix}"
+    """以 prefix 和 namespace 摘要建立稳定集合名，长度遵守 Chroma 限制。"""
+    digest = hashlib.sha256(namespace.encode("utf-8")).hexdigest()[:24]
+    suffix = f"_memory_{digest}"
+    return f"{(prefix or 'm')[: 63 - len(suffix)]}{suffix}"
 
 
-def _collection(config, namespace):
-    """连接配置的 Chroma 服务，返回该命名空间的持久集合，缺失时按 cosine 距离设置创建。"""
+def _collection(config, namespace, create=True):
+    """按 config 定位 namespace；create 为真允许创建，否则只读取既有集合。"""
     import chromadb
-    chroma_config = config['chroma']
+
+    chroma = config["chroma"]
     client = chromadb.HttpClient(
-        host=chroma_config.get('host', '127.0.0.1'),
-        port=int(chroma_config.get('port', 8001)),
+        host=chroma.get("host", "127.0.0.1"), port=int(chroma.get("port", 8001))
     )
-    name = collection_name(
-        chroma_config.get('collection_prefix', 'memmgr'),
-        namespace,
-    )
-    return client.get_or_create_collection(
-        name,
-        metadata={'hnsw:space': 'cosine', 'namespace': namespace},
-    )
+    name = collection_name(chroma.get("collection_prefix", "memmgr"), namespace)
+    if create:
+        collection = client.get_or_create_collection(
+            name, metadata={"hnsw:space": "cosine", "namespace": namespace}
+        )
+    else:
+        collection = client.get_collection(name)
+    if collection.metadata.get("namespace") != namespace:
+        raise ValueError("Memory namespace identity mismatch")
+    return collection
 
 
-def add(config, namespace, text, memory_id=None):
-    """编码并新增一条记忆，返回记忆 ID。
+def _encoder(config, embed):
+    """返回传入 embed 编码器，缺省时按 config 加载共享正式编码规则。"""
+    return embed if embed is not None else make_embedder(config)[1]
 
-    调用者可指定 memory_id，缺省生成 UUID；正文与原始 namespace 一起存储，重复 ID 行为交由 Chroma
-    处理。
-    """
-    _, embed = make_embedder(config)
+
+def _metadata(namespace, metadata):
+    """校验 metadata 为 Chroma 标量字典并持久保存真实 namespace。"""
+    metadata = {} if metadata is None else metadata
+    if not isinstance(metadata, dict) or any(
+        not isinstance(k, str) or not isinstance(v, (str, int, float, bool))
+        for k, v in metadata.items()
+    ):
+        raise ValueError("Metadata must contain string keys and scalar values")
+    return {**metadata, "namespace": namespace}
+
+
+def add(config, namespace, text, memory_id=None, metadata=None, embed=None):
+    """按 config 向 namespace 新增 text/memory_id/metadata，embed 可复用编码器；重复 ID 立即失败。"""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Nonempty text is required")
     memory_id = memory_id or str(uuid.uuid4())
     collection = _collection(config, namespace)
+    if collection.get(ids=[memory_id])["ids"]:
+        raise ValueError("Memory ID already exists")
+    metadata = _metadata(namespace, metadata)
     collection.add(
         ids=[memory_id],
         documents=[text],
-        metadatas=[{'namespace': namespace}],
-        embeddings=embed([text]).tolist(),
+        metadatas=[metadata],
+        embeddings=_encoder(config, embed)([text]).tolist(),
     )
+    actual = collection.get(ids=[memory_id], include=["documents", "metadatas"])
+    if actual["documents"] != [text] or actual["metadatas"] != [metadata]:
+        raise RuntimeError("Memory add readback mismatch")
     return memory_id
 
 
-def update(config, namespace, memory_id, text):
-    """重新编码指定 ID 的文本并更新正文、向量及 namespace 元数据，返回 None。"""
-    _, embed = make_embedder(config)
-    collection = _collection(config, namespace)
+def update(config, namespace, memory_id, text, metadata=None, embed=None):
+    """更新已存在 namespace/memory_id 的 text/metadata；embed 允许复用，结束前核验读回。"""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Nonempty text is required")
+    collection = _collection(config, namespace, create=False)
+    if not collection.get(ids=[memory_id])["ids"]:
+        raise ValueError("Memory ID does not exist")
+    metadata = _metadata(namespace, metadata)
     collection.update(
         ids=[memory_id],
         documents=[text],
-        metadatas=[{'namespace': namespace}],
-        embeddings=embed([text]).tolist(),
+        metadatas=[metadata],
+        embeddings=_encoder(config, embed)([text]).tolist(),
     )
+    actual = collection.get(ids=[memory_id], include=["documents", "metadatas"])
+    if actual["documents"] != [text] or actual["metadatas"] != [metadata]:
+        raise RuntimeError("Memory update readback mismatch")
 
 
 def get(config, namespace, memory_id):
-    """读取指定 ID，返回 Chroma 的 documents/metadatas 结果字典，保留缺失记录的原始返回格式。"""
-    return _collection(config, namespace).get(
-        ids=[memory_id],
-        include=['documents', 'metadatas'],
+    """按 config 只读取得 namespace/memory_id 的真实文本与元数据，不创建集合。"""
+    return _collection(config, namespace, create=False).get(
+        ids=[memory_id], include=["documents", "metadatas"]
     )
 
 
-def list_items(config, namespace):
-    """读取当前命名空间全部记录，返回文档、元数据与原始 ID。"""
-    return _collection(config, namespace).get(include=['documents', 'metadatas'])
+def list_items(config, namespace, limit=None, offset=0):
+    """按 config 对 namespace 执行服务端 limit/offset 分页，缺省 limit 保持 CLI 行为。"""
+    return _collection(config, namespace, create=False).get(
+        limit=limit, offset=offset, include=["documents", "metadatas"]
+    )
 
 
 def delete(config, namespace, memory_id):
-    """从当前命名空间删除指定 ID，持久化副作用由 Chroma 客户端完成。"""
-    _collection(config, namespace).delete(ids=[memory_id])
+    """删除 namespace 内已存在 memory_id，按 config 读取并核实删除持久效果。"""
+    collection = _collection(config, namespace, create=False)
+    if not collection.get(ids=[memory_id])["ids"]:
+        raise ValueError("Memory ID does not exist")
+    collection.delete(ids=[memory_id])
+    if collection.get(ids=[memory_id])["ids"]:
+        raise RuntimeError("Memory deletion readback mismatch")
 
 
-def query(config, namespace, text, k=5):
-    """将查询文本编码后返回前 k 条记忆，结果保留文档、元数据、距离及排名顺序。"""
-    _, embed = make_embedder(config)
-    return _collection(config, namespace).query(
-        query_embeddings=embed([text], query=True).tolist(),
-        n_results=k,
-        include=['documents', 'metadatas', 'distances'],
+def query(config, namespace, text, k=5, embed=None):
+    """按 config 查询 namespace 的 text 前 k 个邻居，embed 可复用正式前缀及归一化编码器。"""
+    collection = _collection(config, namespace, create=False)
+    if not collection.count():
+        return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
+    return collection.query(
+        query_embeddings=_encoder(config, embed)([text], query=True).tolist(),
+        n_results=min(k, collection.count()),
+        include=["documents", "metadatas", "distances"],
     )

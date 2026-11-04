@@ -1,11 +1,12 @@
 """按固定计划执行三档检索与七组端到端初测。
 
-用法：在 WSL 项目根目录运行 `python scripts/run_baseline.py`，无参数。
+用法：在 WSL 项目根目录运行 `python scripts/run_baseline.py [--config CONFIG] [--output-root DIR]`。
 脚本会启动索引、检索和生成任务，并在 `.agent/executions/execution-*` 中保存计划、
 配置、命令、日志及完整性审查记录。调用前需准备模型、数据和本机服务；
 该入口会实际运行测量任务。
 """
 
+import argparse
 import hashlib
 import json
 import os
@@ -16,10 +17,16 @@ from pathlib import Path
 
 
 def code_snapshot() -> dict[str, str]:
-    """返回应用源码文件及其SHA256，供整轮实验前后检查冻结状态。"""
+    """返回应用及执行脚本的 SHA256，供整轮实验前后检查实际冻结源码。"""
     return {
         str(path): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted(Path("memmgr").glob("*.py"))
+        for path in sorted(
+            [
+                *Path("memmgr").glob("*.py"),
+                *Path("scripts").glob("*.py"),
+                *Path("scripts").glob("*.sh"),
+            ]
+        )
     }
 
 
@@ -73,6 +80,9 @@ def review_run_artifact(
                 stdout=review,
                 stderr=subprocess.STDOUT,
                 env=child_environment,
+                pass_fds=(int(child_environment["MEMMGR_RESOURCE_LOCK_FD"]),)
+                if "MEMMGR_RESOURCE_LOCK_FD" in child_environment
+                else (),
                 timeout=60,
             )
         record["integrity_returncode"] = guard.returncode
@@ -140,6 +150,9 @@ def execute(
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 env=child_environment,
+                pass_fds=(int(child_environment["MEMMGR_RESOURCE_LOCK_FD"]),)
+                if "MEMMGR_RESOURCE_LOCK_FD" in child_environment
+                else (),
                 timeout=timeout,
             )
             record["returncode"] = completed.returncode
@@ -147,9 +160,7 @@ def execute(
             record.update(returncode=None, failure=repr(error))
 
     artifact_prefix = f"{config['experiment']['output_dir']}/"
-    artifact_paths = find_artifact_paths(
-        log_path, config["experiment"]["output_dir"]
-    )
+    artifact_paths = find_artifact_paths(log_path, config["experiment"]["output_dir"])
     if artifact_paths:
         record["run_directory"] = str(artifact_paths[-1])
         copy_command_log(artifact_paths[-1], log_path)
@@ -168,9 +179,7 @@ def execute(
 
     record["wall_seconds"] = time.monotonic() - started
     records.append(record)
-    (execution_dir / "commands.json").write_text(
-        json.dumps(records, indent=2) + "\n"
-    )
+    (execution_dir / "commands.json").write_text(json.dumps(records, indent=2) + "\n")
     print(json.dumps(record), flush=True)
 
     if record.get("integrity_returncode", 0) != 0:
@@ -187,11 +196,18 @@ def main() -> None:
     计划使用30个检索问题、8个问答问题，各重复两次并预热一次；
     服务端调度维持单序列，客户端并发条件为配置中的1、2、4。
     """
-    execution_dir = Path(".agent/executions") / (
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="config/baseline.json")
+    parser.add_argument("--output-root", default=".agent/executions")
+    args = parser.parse_args()
+    execution_dir = Path(args.output_root) / (
         "execution-" + time.strftime("%Y%m%d-%H%M%S")
     )
     execution_dir.mkdir(parents=True)
-    base_config = json.loads(Path("config/baseline.json").read_text())
+    base_config = json.loads(Path(args.config).read_text())
+    server_config = base_config.get("_web_snapshot", {}).get("server") or json.loads(
+        Path("config/server.json").read_text()
+    )
     frozen_code = code_snapshot()
     base_config["_code_snapshot"] = frozen_code
     (execution_dir / "code-snapshot.json").write_text(
@@ -211,14 +227,16 @@ def main() -> None:
         ]
     ]
     plan = {
-        "queries_retrieval": 30,
-        "queries_e2e": 8,
-        "repeats": 2,
-        "warmups": 1,
-        "server_max_num_seqs": 1,
-        "server_max_model_len": 2048,
+        "queries_retrieval": base_config["dataset"]["query_count"],
+        "queries_e2e": min(
+            base_config["experiment"]["queries"], base_config["dataset"]["query_count"]
+        ),
+        "repeats": base_config["experiment"]["repeats"],
+        "warmups": base_config["experiment"]["warmups"],
+        "server_max_num_seqs": server_config["max_num_seqs"],
+        "server_max_model_len": base_config["llm"]["max_model_len"],
         "note": (
-            "Client concurrency2/4 measures queueing; server scheduling remains1. "
+            f"Client concurrency2/4 includes queueing; actual configured server max_num_seqs={server_config['max_num_seqs']}. "
             "The seven E2E rows change one dimension relative to1024/k3/c1."
         ),
         "retrieval_tiers": ["small", "medium", "full"],
@@ -232,33 +250,37 @@ def main() -> None:
         HF_HUB_OFFLINE="1",
         TRANSFORMERS_OFFLINE="1",
         OMP_NUM_THREADS="2",
-        HF_HOME="/home/tindalos/.cache/huggingface",
     )
     records = []
     for tier in plan["retrieval_tiers"]:
-        if execute(
-            execution_dir,
-            frozen_code,
-            child_environment,
-            records,
-            f"index-{tier}",
-            base_config,
-            ["index", "--tier", tier],
-        ):
+        if (
             execute(
                 execution_dir,
                 frozen_code,
                 child_environment,
                 records,
-                f"retrieval-{tier}",
+                f"index-{tier}",
                 base_config,
-                ["retrieval", "--tier", tier, "--concurrency", "1"],
+                ["index", "--tier", tier],
             )
+            is False
+        ):
+            raise RuntimeError(f"Index failed: {tier}")
+        if not execute(
+            execution_dir,
+            frozen_code,
+            child_environment,
+            records,
+            f"retrieval-{tier}",
+            base_config,
+            ["retrieval", "--tier", tier, "--concurrency", "1"],
+        ):
+            raise RuntimeError(f"Retrieval failed: {tier}")
 
     for index, condition in enumerate(plan["e2e"], 1):
         config = json.loads(json.dumps(base_config))
         config["experiment"].update(condition)
-        execute(
+        if not execute(
             execution_dir,
             frozen_code,
             child_environment,
@@ -267,7 +289,8 @@ def main() -> None:
             config,
             ["run", "--tier", "small", "--concurrency", str(condition["concurrency"])],
             timeout=900,
-        )
+        ):
+            raise RuntimeError(f"RAG failed: e2e-{index}")
 
     print(execution_dir, flush=True)
 

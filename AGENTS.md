@@ -44,30 +44,53 @@
 
 不要过度自我否定，不要主动削弱研究贡献，不要把论文写成检讨书，而是准确地，有力地呈现研究结果
 
+新加入功能的时候，不要将你自己的验证记录补充到文档中，我只需要文档中有如何操作的指南即可
+
 ## 目录索引
-- [README.md](README.md)：项目入口与本地启动示例。
-- [docs/deployment.md](docs/deployment.md)：环境准备、服务部署、SciFact 数据与迁移命令。
-- [docs/experiment-design.md](docs/experiment-design.md)：实验分组、参数与指标含义、计时边界和复现步骤。
-- [reports/baseline-report.md](reports/baseline-report.md)：最终实验报告。
+- [README.md](README.md)：项目入口、安装与常用命令。
+- [start-webui.sh](start-webui.sh)：从项目根目录启动本机 WebUI。
+- `.env.webui`（本机可选）：指定 WebUI 启动使用的 `PYTHON` 解释器，不提交到 Git。
+- 文档与报告：
+  - [docs/部署.md](docs/部署.md)：依赖安装、启动、使用、停止与常见问题。
+  - [docs/实验设计.md](docs/实验设计.md)：数据抽样、实验分组、参数、指标口径与复现命令。
+  - [reports/本机基线实测报告.md](reports/本机基线实测报告.md)：实测结果、图表与问答示例。
 - 配置文件：
-  - [config/baseline.json](config/baseline.json)：数据集、检索与实验参数。
-  - [config/models.json](config/models.json)：模型 revision 与本地快照位置。
+  - [config/baseline.json](config/baseline.json)：数据集、检索、生成与实验参数。
+  - [config/models.json](config/models.json)：模型 ID 与固定 revision。
   - [config/server.json](config/server.json)：vLLM 模型、服务地址与调度参数。
+- WebUI 前端 [web/](web/)：
+  - `src/main.tsx`：页面入口、导航与布局。
+  - `src/operations.tsx`：总览、服务资源监控、实验任务与数据索引管理。
+  - `src/streams.tsx`：流式问答、请求详情与日志。
+  - `src/database.tsx`：集合浏览、语义检索与长期记忆操作。
+  - `src/configuration.tsx`、`src/reports.tsx`：配置编辑、报告与运行对比。
+  - `src/api.ts`、`src/ui.tsx`、`src/styles.css`：API 客户端、共用组件与样式。
+  - `package.json`、`package-lock.json`、`vite.config.ts`：前端依赖与构建配置；`dist/` 为构建产物。
 - 应用模块 [memmgr/](memmgr/)：
   - `cli.py`：命令行参数解析与子命令派发。
   - `data.py`、`index.py`：SciFact 数据准备、校验、分块、编码与 Chroma 向量写入。
-  - `retrieval.py`、`prompt.py`、`streaming.py`：查询与相关性读取、证据组装、输入预算和流式生成。
-  - `rag_batch.py`、`retrieval_batch.py`：端到端问答与纯检索测量。
+  - `retrieval.py`、`prompt.py`、`streaming.py`：检索评分、证据组装、输入预算与流式生成。
+  - `batch.py`、`rag_batch.py`、`retrieval_batch.py`：批量执行、端到端问答与纯检索测量。
   - `memory.py`、`memory_check.py`：长期记忆增删改查与重启持久化检查。
-  - `resources.py`、`run_metadata.py`：资源采样和运行配置、源码、数据摘要记录。
+  - `models.py`、`server.py`：固定 revision 模型缓存解析与 vLLM 启动。
+  - `resources.py`、`service_status.py`：资源采样与服务健康检查。
+  - `run_metadata.py`：运行配置、环境、源码与数据摘要记录。
+  - `web.py`：WebAPI、流式问答及前端静态资源入口。
+  - `web_config.py`、`web_schema.py`：配置校验、访问边界与任务配置快照。
+  - `web_tasks.py`：任务进程、资源锁、取消与状态恢复。
+  - `web_services.py`、`web_runtime.py`：服务启动、进程身份与实际运行参数核对。
+  - `web_logs.py`、`web_records.py`：Chroma 日志跟随与完整 JSONL 记录读取。
 - 脚本 [scripts/](scripts/)：
   - `download_models.py`：下载固定 revision 的模型。
   - `start-vllm.sh`、`chroma.sh`、`service_status.py`：启动与查看本地服务。
-  - `index_measured.py`、`run_baseline.py`：索引测量和基线实验编排。
-  - `summarize_baseline.py`、`review_run.py`、`review_retrieval.py`：汇总和检查正式测量记录。
-- 测试：[tests/test_contracts.py](tests/test_contracts.py)检查数据格式、索引身份与隔离边界；[tests/test_prompt_budget.py](tests/test_prompt_budget.py)检查真实 tokenizer 的输入预算。
-- [data/scifact-baseline/](data/scifact-baseline/)：SciFact 文献语料、问题、相关性标签、数据元信息与索引清单。
-- [requirements.in](requirements.in)：直接依赖；[constraints.txt](constraints.txt)：固定软件包版本。
-- [compose.yaml](compose.yaml)：Chroma 服务和持久数据卷配置。
-- `.agent/`：运行时按需生成的 Agent 临时输出，任务完成后清理。
-- [.gitignore](.gitignore)：排除临时输出、数据集、缓存与本地环境文件。
+  - `index_measured.py`、`run_baseline.py`：索引测量与基线实验编排。
+  - `summarize_baseline.py`、`review_run.py`、`review_retrieval.py`：汇总与检查正式测量记录。
+- 测试 [tests/](tests/)：
+  - `test_contracts.py`、`test_prompt_budget.py`：数据格式、索引身份、隔离边界与真实 tokenizer 预算。
+  - `web_live_acceptance.py`：真实 WebAPI 的安全、配置与数据隔离检查。
+  - `web_task_lifecycle.py`、`web_service_start.py`：任务取消、后端重启与服务启动检查，需按脚本说明单独执行。
+- [data/scifact-baseline/](data/scifact-baseline/)：SciFact 语料、问题、标签、数据元信息与索引清单。
+- `.agent/`：实验记录、WebUI 持久状态、隔离工作区与日志。
+- [requirements.in](requirements.in)、[constraints.txt](constraints.txt)：Python 依赖与固定版本。
+- [compose.yaml](compose.yaml)：Chroma 服务与持久数据卷配置。
+- [.gitignore](.gitignore)：排除运行产物、数据集、缓存与本地环境文件。
