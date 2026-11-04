@@ -1,0 +1,18 @@
+{
+  "model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "revision": "989aa7980e4cf806f80c7fef2b1adb7bc71aa306",
+  "dtype": "float16",
+  "max_model_len": 2048,
+  "max_num_seqs": 1,
+  "enforce_eager": true,
+  "gpu_memory_utilization": 0.8,
+  "host": "127.0.0.1",
+  "port": 8000,
+  "VLLM_USE_V2_MODEL_RUNNER": "0",
+  "VLLM_USE_FLASHINFER_SAMPLER": "0",
+  "HF_HUB_OFFLINE": "1",
+  "TRANSFORMERS_OFFLINE": "1",
+  "prefix_caching": "vLLM default enabled (observed server log)",
+  "chunked_prefill": "vLLM default enabled (observed server log)",
+  "concurrency_semantics": "Client concurrency2/4 includes queueing behind the fixed server max_num_seqs1; no claim of model parallel concurrency."
+}
