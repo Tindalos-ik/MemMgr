@@ -16,8 +16,8 @@ import chromadb
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from memmgr.service_status import health_snapshot
-from memmgr.web_config import configs
+from memmgr.inference.service_status import health_snapshot
+from memmgr.webui.config import configs
 
 
 def main() -> None:

@@ -53,6 +53,7 @@
 - 文档与报告：
   - [docs/部署.md](docs/部署.md)：依赖安装、启动、使用、停止与常见问题。
   - [docs/实验设计.md](docs/实验设计.md)：数据抽样、实验分组、参数、指标口径与复现命令。
+  - [docs/目录与协作.md](docs/目录与协作.md)：包边界、模块职责、共享入口负责人和开发测试命令。
   - [reports/本机基线实测报告.md](reports/本机基线实测报告.md)：实测结果、图表与问答示例。
 - 配置文件：
   - [config/baseline.json](config/baseline.json)：数据集、检索、生成与实验参数。
@@ -67,28 +68,22 @@
   - `src/api.ts`、`src/ui.tsx`、`src/styles.css`：API 客户端、共用组件与样式。
   - `package.json`、`package-lock.json`、`vite.config.ts`：前端依赖与构建配置；`dist/` 为构建产物。
 - 应用模块 [memmgr/](memmgr/)：
-  - `cli.py`：命令行参数解析与子命令派发。
-  - `data.py`、`index.py`：SciFact 数据准备、校验、分块、编码与 Chroma 向量写入。
-  - `retrieval.py`、`prompt.py`、`streaming.py`：检索评分、证据组装、输入预算与流式生成。
-  - `batch.py`、`rag_batch.py`、`retrieval_batch.py`：批量执行、端到端问答与纯检索测量。
-  - `memory.py`、`memory_check.py`：长期记忆增删改查与重启持久化检查。
-  - `models.py`、`server.py`：固定 revision 模型缓存解析与 vLLM 启动。
-  - `resources.py`、`service_status.py`：资源采样与服务健康检查。
-  - `run_metadata.py`：运行配置、环境、源码与数据摘要记录。
-  - `web.py`：WebAPI、流式问答及前端静态资源入口。
-  - `web_config.py`、`web_schema.py`：配置校验、访问边界与任务配置快照。
-  - `web_tasks.py`：任务进程、资源锁、取消与状态恢复。
-  - `web_services.py`、`web_runtime.py`：服务启动、进程身份与实际运行参数核对。
-  - `web_logs.py`、`web_records.py`：Chroma 日志跟随与完整 JSONL 记录读取。
+  - `__init__.py`、`__main__.py`、`cli.py`：包初始化、`python -m memmgr` 入口与命令行派发。
+  - [long_term/](memmgr/long_term/)：`data.py`、`index.py` 负责数据准备、分块与向量索引；`retrieval.py` 负责检索评分；`memory.py` 负责长期记忆增删改查。
+  - [short_term/](memmgr/short_term/)：仅有 `__init__.py`，声明短期 KV 策略职责；真实 KV 管理尚未实现。
+  - [inference/](memmgr/inference/)：`models.py`、`server.py` 负责模型缓存解析和 vLLM 启动；`prompt.py`、`streaming.py` 负责证据组装、输入预算和流式生成；`service_status.py` 负责服务健康检查。
+  - [benchmarks/](memmgr/benchmarks/)：`batch.py`、`rag_batch.py`、`retrieval_batch.py` 负责实验批次；`resources.py` 负责资源采样；`run_metadata.py` 负责配置、环境及递归源码摘要；`memory_check.py` 负责长期记忆重启持久化检查。
+  - [webui/](memmgr/webui/)：`app.py` 为 WebAPI、流式问答及静态资源入口；`config.py`、`schema.py` 负责配置校验、访问边界与配置快照；`tasks.py` 负责后台任务、锁、取消与恢复；`services.py`、`runtime.py` 负责服务进程和运行参数核对；`logs.py`、`records.py` 负责 Chroma 日志跟随与完整 JSONL 读取。
 - 脚本 [scripts/](scripts/)：
   - `download_models.py`：下载固定 revision 的模型。
   - `start-vllm.sh`、`chroma.sh`、`service_status.py`：启动与查看本地服务。
   - `index_measured.py`、`run_baseline.py`：索引测量与基线实验编排。
   - `summarize_baseline.py`、`review_run.py`、`review_retrieval.py`：汇总与检查正式测量记录。
 - 测试 [tests/](tests/)：
-  - `test_contracts.py`、`test_prompt_budget.py`：数据格式、索引身份、隔离边界与真实 tokenizer 预算。
-  - `web_live_acceptance.py`：真实 WebAPI 的安全、配置与数据隔离检查。
-  - `web_task_lifecycle.py`、`web_service_start.py`：任务取消、后端重启与服务启动检查，需按脚本说明单独执行。
+  - `long_term/test_contracts.py`：数据格式、索引身份与隔离边界。
+  - `inference/test_prompt_budget.py`：真实 tokenizer 提示词预算。
+  - `integration/web_live_acceptance.py`：真实 WebAPI 的安全、配置与数据隔离检查。
+  - `integration/web_task_lifecycle.py`、`integration/web_service_start.py`：任务取消、后端重启与服务启动检查，需按脚本说明单独执行。
 - [data/scifact-baseline/](data/scifact-baseline/)：SciFact 语料、问题、标签、数据元信息与索引清单。
 - `.agent/`：实验记录、WebUI 持久状态、隔离工作区与日志。
 - [requirements.in](requirements.in)、[constraints.txt](constraints.txt)：Python 依赖与固定版本。

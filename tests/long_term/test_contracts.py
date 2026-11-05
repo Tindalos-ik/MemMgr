@@ -6,9 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from memmgr.data import _qrels
-from memmgr.index import validate_chunk_config, index_collection_name, index_identity
-from memmgr.memory import collection_name
+from memmgr.long_term.data import _qrels
+from memmgr.long_term.index import validate_chunk_config, index_collection_name, index_identity
+from memmgr.long_term.memory import collection_name
 
 
 class ConsumerContracts(unittest.TestCase):

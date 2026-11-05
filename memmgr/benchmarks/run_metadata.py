@@ -25,10 +25,10 @@ def sha256_file(path: Path) -> str:
 
 def code_fingerprints() -> dict:
     """按文件名排序计算当前 memmgr 包所有 Python 文件的摘要，返回项目相对路径到摘要的字典。"""
-    source_root = Path(__file__).parent
+    source_root = Path(__file__).resolve().parents[1]
     return {
         str(p.relative_to(source_root.parent).as_posix()): sha256_file(p)
-        for p in sorted(source_root.glob("*.py"))
+        for p in sorted(source_root.rglob("*.py"))
     }
 
 

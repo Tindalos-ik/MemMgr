@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from .web_config import (
+from .config import (
     ROOT,
     STATE,
     NAMES,
@@ -33,17 +33,17 @@ from .web_config import (
     validate_configs,
     workspace_root,
 )
-from .web_tasks import resource_lock, start_task, read_task, cancel_task
-from .web_records import complete_rows, incomplete_tail
+from .tasks import resource_lock, start_task, read_task, cancel_task
+from .records import complete_rows, incomplete_tail
 
 
 @asynccontextmanager
 async def lifespan(app):
     """在 app 启停时管理真实资源采样线程与后端日志。"""
-    from .resources import sample
+    from ..benchmarks.resources import sample
 
     STATE.mkdir(parents=True, exist_ok=True)
-    from .web_config import save_configs
+    from .config import save_configs
 
     if (STATE / "config-transaction.json").exists():
         save_configs(configs())
@@ -75,7 +75,7 @@ async def lifespan(app):
         daemon=True,
     )
     thread.start()
-    from .web_logs import ChromaLogs
+    from .logs import ChromaLogs
 
     try:
         follower = ChromaLogs(configs()["baseline"]["resources"]["chroma_container"])
@@ -177,8 +177,8 @@ def page_result(result):
 async def health():
     """读取实际 vLLM/Chroma 健康接口并保留不可达的具体错误。"""
     result = {"backend": {"status": "ok", "pid": os.getpid(), "timestamp": time.time()}}
-    from .service_status import health_snapshot
-    from .web_runtime import capture_runtime
+    from ..inference.service_status import health_snapshot
+    from .runtime import capture_runtime
 
     snapshot = configs()
     result.update(await health_snapshot(snapshot["baseline"]))
@@ -196,11 +196,11 @@ async def health():
 @app.get("/api/services")
 def services():
     """重新发现两个固定服务的真实健康、启动状态及进程归属。"""
-    from .web_services import NAMES, service_status
+    from .services import NAMES, service_status
 
     result = {name: service_status(name) for name in NAMES}
     if result["chroma"]["status"] == "running":
-        from .web_logs import ChromaLogs
+        from .logs import ChromaLogs
 
         with app.state.chroma_log_lock:
             follower = app.state.chroma_follower
@@ -223,7 +223,7 @@ def services():
 @app.post("/api/services/{name}/start")
 def service_start(name: str, value: dict):
     """以空 value 请求启动固定 name 服务，保留共享资源冲突及原始错误。"""
-    from .web_services import NAMES, start_service
+    from .services import NAMES, start_service
 
     if name not in NAMES:
         raise HTTPException(404, "Unknown service")
@@ -280,7 +280,7 @@ def get_config():
 @app.get("/api/config/schema")
 def config_schema():
     """返回可编辑配置字段的现有实际类型及只读元数据。"""
-    from .web_schema import BaselineConfig, ModelSnapshot, ServerConfig
+    from .schema import BaselineConfig, ModelSnapshot, ServerConfig
 
     return {
         "values": configs(),
@@ -306,7 +306,7 @@ def config_schema():
 @app.put("/api/config")
 def put_configs(values: dict):
     """对 values 中 baseline/models/server 整组校验并事务保存，支持关联字段一起修改。"""
-    from .web_config import save_configs
+    from .config import save_configs
 
     if set(values) != set(NAMES):
         raise ValueError("Require baseline, models and server")
@@ -328,7 +328,7 @@ def put_config(name: str, value: dict):
         all_configs = configs()
         all_configs[name] = value
         validate_configs(all_configs)
-        from .web_config import save_configs
+        from .config import save_configs
 
         save_configs(all_configs)
     return {
@@ -363,7 +363,7 @@ def workspaces():
             }
             if item["tiers"][tier]["corpus_exists"]:
                 try:
-                    from .retrieval import open_collection
+                    from ..long_term.retrieval import open_collection
 
                     collection, manifest = open_collection(
                         effective_config(configs(), name, STATE / "unused"), tier
@@ -468,8 +468,8 @@ def collection_page(
 
 def retrieve(value, expected=None):
     """按 value 真实编码查询；expected 非空时校验所选集合身份一致。"""
-    from .index import make_embedder
-    from .retrieval import open_collection
+    from ..long_term.index import make_embedder
+    from ..long_term.retrieval import open_collection
 
     config = effective_config(configs(), value.workspace, STATE / "unused")
     started = time.perf_counter()
@@ -518,7 +518,7 @@ def collection_query(name: str, value: QueryInput):
 
 def memory_collection(namespace, create=False):
     """读取 namespace 的专有记忆集合；create 只在新增写入时允许创建。"""
-    from .memory import _collection
+    from ..long_term.memory import _collection
     from chromadb.errors import NotFoundError
 
     safe_name(namespace)
@@ -569,7 +569,7 @@ def memory_page(
     """读取 namespace 的服务端 limit/offset 记忆分页。"""
     with resource_lock():
         collection = memory_collection(namespace)
-        from .memory import list_items
+        from ..long_term.memory import list_items
 
         return {
             "items": page_result(list_items(memory_config(), namespace, limit, offset)),
@@ -582,7 +582,7 @@ def memory_page(
 @app.post("/api/memory/{namespace}/query")
 def memory_query(namespace: str, value: QueryInput):
     """以正式查询前缀和归一化向量查询 namespace 真实记忆。"""
-    from .memory import query
+    from ..long_term.memory import query
 
     with resource_lock():
         collection = memory_collection(namespace)
@@ -605,7 +605,7 @@ def memory_query(namespace: str, value: QueryInput):
 
 def memory_write(namespace, value, memory_id=None):
     """新增或更新 namespace 的 value 文本及 metadata；memory_id 非空要求原记录存在。"""
-    from . import memory
+    from ..long_term import memory
 
     identifier = memory_id or value["id"]
     if not isinstance(identifier, str) or not identifier or len(identifier) > 512:
@@ -652,7 +652,7 @@ def memory_delete(namespace: str, memory_id: str, confirm: bool = False):
     if not confirm:
         raise ValueError("Deletion requires confirm=true")
     with resource_lock():
-        from .memory import delete
+        from ..long_term.memory import delete
 
         memory_collection(namespace)
         delete(memory_config(), namespace, memory_id)
@@ -691,14 +691,14 @@ async def owned_thread(function, *args, **kwargs):
 @app.post("/api/qa")
 async def qa(value: QueryInput, request: Request):
     """按 value 执行真实检索、提示词预算和流式问答，以 SSE 逐阶段发送并持久化。"""
-    from .prompt import assemble_prompt
-    from .streaming import stream_completion
+    from ..inference.prompt import assemble_prompt
+    from ..inference.streaming import stream_completion
 
     lock = resource_lock()
     lock.__enter__()
     record = None
     try:
-        from .web_runtime import capture_runtime
+        from .runtime import capture_runtime
 
         snapshot = configs()
         validate_configs(snapshot)
@@ -917,7 +917,7 @@ def logs(
     if source == "backend":
         path = STATE / "backend.log"
     elif source in ("service-vllm", "service-chroma"):
-        from .web_services import service_path
+        from .services import service_path
 
         path = service_path(source.removeprefix("service-")) / "service.log"
         if not path.exists():

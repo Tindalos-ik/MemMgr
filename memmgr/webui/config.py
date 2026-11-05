@@ -8,9 +8,9 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .models import local_snapshot
+from ..inference.models import local_snapshot
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 STATE = ROOT / ".agent" / "web"
 NAMES = ("baseline", "models", "server")
 
@@ -99,8 +99,8 @@ def save_configs(values):
 
 def validate_configs(all_configs):
     """校验 all_configs 类型、范围、跨文件模型身份和本机路径边界。"""
-    from .index import validate_chunk_config
-    from .web_schema import BaselineConfig, ModelSnapshot, ServerConfig
+    from ..long_term.index import validate_chunk_config
+    from .schema import BaselineConfig, ModelSnapshot, ServerConfig
 
     if not isinstance(all_configs, dict) or set(all_configs) != set(NAMES):
         raise ValueError("Require baseline, models and server")

@@ -6,4 +6,4 @@ if [[ -z "${PYTHON:-}" && -f .env ]]; then
 fi
 export OMP_NUM_THREADS=2
 PYTHON="${PYTHON:-.venv/bin/python}"
-exec "$PYTHON" -m memmgr.server --server "${1:-config/server.json}" --models "${2:-config/models.json}"
+exec "$PYTHON" -m memmgr.inference.server --server "${1:-config/server.json}" --models "${2:-config/models.json}"

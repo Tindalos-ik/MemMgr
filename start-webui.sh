@@ -14,4 +14,4 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export OMP_NUM_THREADS=2
 PYTHON="${PYTHON:-.venv/bin/python}"
-exec "$PYTHON" -m uvicorn memmgr.web:app --host 127.0.0.1 --port 8765
+exec "$PYTHON" -m uvicorn memmgr.webui.app:app --host 127.0.0.1 --port 8765

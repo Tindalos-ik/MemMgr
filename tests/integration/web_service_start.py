@@ -1,4 +1,4 @@
-"""使用临时代码/config 副本验证真实服务启动边界；显式执行 python tests/web_service_start.py。
+"""使用临时代码/config 副本验证真实服务启动边界；显式执行 python tests/integration/web_service_start.py。
 
 无 GPU 条件通过 CUDA_VISIBLE_DEVICES='' 提供；不停止现有服务，不写正式数据或结果。
 """
@@ -20,7 +20,7 @@ import unittest
 
 import httpx
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def free_port():
@@ -33,8 +33,8 @@ def free_port():
 def log_recovery():
     """在临时副本中实际断开/恢复 Docker daemon，检查原始诊断与 RFC3339 订阅恢复。"""
     sys.path.insert(0, str(Path.cwd()))
-    from memmgr.web_config import STATE, configs, read_json
-    from memmgr.web_logs import ChromaLogs, docker_timestamp
+    from memmgr.webui.config import STATE, configs, read_json
+    from memmgr.webui.logs import ChromaLogs, docker_timestamp
 
     container = configs()["baseline"]["resources"]["chroma_container"]
     path = STATE / "chroma.log"
@@ -132,7 +132,7 @@ class ServiceStartup(unittest.TestCase):
             sys.executable,
             "-m",
             "uvicorn",
-            "memmgr.web:app",
+            "memmgr.webui.app:app",
             "--host",
             "127.0.0.1",
             "--port",
@@ -306,12 +306,12 @@ class ServiceStartup(unittest.TestCase):
             self.assertEqual(
                 discovered["running_configuration"], record["running_configuration"]
             )
-            # 独立验证 memmgr.server 在无可见 GPU 时的真实错误，不绕过 API 的防重复保护。
+            # 独立验证 memmgr.inference.server 在无可见 GPU 时的真实错误，不绕过 API 的防重复保护。
             failed = subprocess.run(
                 [
                     sys.executable,
                     "-m",
-                    "memmgr.server",
+                    "memmgr.inference.server",
                     "--server",
                     str(self.root / "config/server.json"),
                     "--models",
@@ -411,7 +411,7 @@ class ServiceStartup(unittest.TestCase):
                 [
                     sys.executable,
                     "-m",
-                    "memmgr.web_services",
+                    "memmgr.webui.services",
                     "chroma",
                     str(lock.fileno()),
                     str(read_gate),
@@ -469,8 +469,8 @@ class ServiceStartup(unittest.TestCase):
         """真实解析生成缓存，验证服务校验不依赖 embedding 且实验设置不会触发重启差异。"""
         code = '''"""在临时副本中检查服务启动实际所需配置。"""
 import copy
-from memmgr.web_config import configs
-from memmgr.web_services import service_configuration, validate_service_configuration
+from memmgr.webui.config import configs
+from memmgr.webui.services import service_configuration, validate_service_configuration
 original = configs()
 changed = copy.deepcopy(original)
 changed["baseline"]["experiment"]["top_k"] += 1
@@ -501,12 +501,12 @@ class ServiceGroupLifecycle(unittest.TestCase):
     def test_exited_leader_cleanup(self):
         """leader 实际退出1且子进程继续时清理整组，并核实另一独立 session 未受影响。"""
         sys.path.insert(0, str(ROOT))
-        from memmgr.web_services import (
+        from memmgr.webui.services import (
             alive,
             finish_service_group,
             service_group_members,
         )
-        from memmgr.web_tasks import process_identity
+        from memmgr.webui.tasks import process_identity
 
         sentinel = subprocess.Popen(["sleep", "120"], start_new_session=True)
         sentinel_identity = process_identity(sentinel.pid)

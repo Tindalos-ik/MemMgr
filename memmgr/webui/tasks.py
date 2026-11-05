@@ -14,7 +14,7 @@ import time
 import traceback
 from pathlib import Path
 
-from .web_config import (
+from .config import (
     ROOT,
     STATE,
     configs,
@@ -60,7 +60,7 @@ def process_matches(record):
         process = psutil.Process(record["pid"])
         return (
             process_identity(record["pid"]) == record["process_identity"]
-            and "memmgr.web_tasks" in process.cmdline()
+            and "memmgr.webui.tasks" in process.cmdline()
             and record["id"] in process.cmdline()
             and process.status() != psutil.STATUS_ZOMBIE
         )
@@ -96,7 +96,7 @@ def owned_group_members(record):
     proof = any(
         str(task_path(record["id"])) in " ".join(p.info.get("cmdline") or [])
         or (
-            "memmgr.web_tasks" in (p.info.get("cmdline") or [])
+            "memmgr.webui.tasks" in (p.info.get("cmdline") or [])
             and record["id"] in (p.info.get("cmdline") or [])
         )
         for p in members
@@ -162,7 +162,7 @@ def read_task(task_id):
         record.get("started_at") or record["created_at"]
     )
     counts = {"formal": 0, "warmup": 0, "ok": 0, "failed": 0, "usage_missing": 0}
-    from .web_records import complete_rows, incomplete_tail
+    from .records import complete_rows, incomplete_tail
     import hashlib
 
     run_ids = []
@@ -206,7 +206,7 @@ def start_task(request):
         raise ValueError(
             "Tasks must use an isolated workspace; formal data/results are read-only"
         )
-    from .web_config import workspace_root
+    from .config import workspace_root
 
     root = workspace_root(request.workspace)
     if request.kind in ("prepare", "rebuild") and not request.confirm:
@@ -216,13 +216,13 @@ def start_task(request):
         task_id = uuid.uuid4().hex
         directory = task_path(task_id)
         snapshot = configs()
-        from .web_config import validate_configs
+        from .config import validate_configs
 
         validate_configs(snapshot)
         from scripts.run_baseline import code_snapshot
 
         snapshot["source_sha256"] = code_snapshot()
-        from .web_runtime import capture_runtime
+        from .runtime import capture_runtime
 
         snapshot["runtime"] = capture_runtime(
             snapshot, require_llm=request.kind in ("rag", "baseline")
@@ -246,7 +246,7 @@ def start_task(request):
         save_json(directory / "task.json", record)
         with (directory / "task.log").open("ab") as log:
             process = subprocess.Popen(
-                [sys.executable, "-m", "memmgr.web_tasks", task_id],
+                [sys.executable, "-m", "memmgr.webui.tasks", task_id],
                 cwd=ROOT,
                 stdout=log,
                 stderr=subprocess.STDOUT,
@@ -341,7 +341,7 @@ def execute_task(task_id):
                 )
             kind = record["kind"]
             if kind == "rebuild":
-                from .retrieval import open_collection
+                from ..long_term.retrieval import open_collection
 
                 collection, manifest = open_collection(config, record["tier"])
                 import chromadb
@@ -364,7 +364,7 @@ def execute_task(task_id):
                 ).unlink()
                 kind = "index"
             if kind == "prepare":
-                from .data import prepare
+                from ..long_term.data import prepare
 
                 result = prepare(config)
                 print(json.dumps(result), flush=True)
@@ -405,7 +405,7 @@ def execute_task(task_id):
                     pass_fds=(lock.fileno(),),
                     env=dict(os.environ, MEMMGR_RESOURCE_LOCK_FD=str(lock.fileno())),
                 )
-                from .web_records import complete_rows
+                from .records import complete_rows
 
                 for failure_file in (directory / "runs").glob("*/failures.jsonl"):
                     for failure in complete_rows(failure_file):
@@ -418,7 +418,7 @@ def execute_task(task_id):
     except Exception as exc:
         traceback.print_exc()
         error = f"{type(exc).__name__}: {exc}"
-        from .web_records import complete_rows
+        from .records import complete_rows
 
         failures = (
             row

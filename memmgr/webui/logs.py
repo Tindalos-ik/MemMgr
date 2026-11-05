@@ -5,7 +5,7 @@ import subprocess
 import re
 import threading
 from pathlib import Path
-from .web_config import STATE, save_json, read_json
+from .config import STATE, save_json, read_json
 
 
 def docker_timestamp(line):
@@ -34,7 +34,7 @@ class ChromaLogs:
         self.path = STATE / "chroma.log"
         self.status = STATE / "chroma-log-status.json"
         import psutil
-        from .web_tasks import process_identity
+        from .tasks import process_identity
 
         if self.status.exists():
             previous = read_json(self.status)

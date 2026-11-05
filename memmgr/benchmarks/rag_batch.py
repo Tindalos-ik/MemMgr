@@ -16,11 +16,11 @@ import time
 import uuid
 from pathlib import Path
 
-from .index import make_embedder
-from .prompt import assemble_prompt
-from .retrieval import load_queries_and_qrels, open_collection, score_retrieval
+from ..long_term.index import make_embedder
+from ..inference.prompt import assemble_prompt
+from ..long_term.retrieval import load_queries_and_qrels, open_collection, score_retrieval
 from .run_metadata import write_run_metadata, finish_environment_snapshot
-from .streaming import stream_completion
+from ..inference.streaming import stream_completion
 from .batch import append_request, gather_requests
 
 

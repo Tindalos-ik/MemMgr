@@ -7,7 +7,7 @@ import unittest
 
 from transformers import AutoTokenizer
 
-from memmgr.prompt import assemble_prompt
+from memmgr.inference.prompt import assemble_prompt
 
 
 class RealQwenPromptBudget(unittest.TestCase):

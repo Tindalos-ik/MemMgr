@@ -22,7 +22,7 @@ def code_snapshot() -> dict[str, str]:
         str(path): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted(
             [
-                *Path("memmgr").glob("*.py"),
+                *Path("memmgr").rglob("*.py"),
                 *Path("scripts").glob("*.py"),
                 *Path("scripts").glob("*.sh"),
             ]

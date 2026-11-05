@@ -17,9 +17,9 @@ import traceback
 import uuid
 from pathlib import Path
 
-from .service_status import health_snapshot
-from .web_config import ROOT, STATE, configs, read_json, save_json
-from .web_tasks import process_identity
+from ..inference.service_status import health_snapshot
+from .config import ROOT, STATE, configs, read_json, save_json
+from .tasks import process_identity
 
 NAMES = ("vllm", "chroma")
 
@@ -183,7 +183,7 @@ def local_vllm_processes():
 
 def validate_service_configuration(snapshot, name):
     """复用固定 schema 校验 snapshot 中 name 所需配置，仅解析 vLLM 的生成模型。"""
-    from .web_schema import ChromaConfig, ServerConfig, ModelSnapshot, LLMConfig
+    from .schema import ChromaConfig, ServerConfig, ModelSnapshot, LLMConfig
 
     if name == "chroma":
         ChromaConfig.model_validate(snapshot["baseline"]["chroma"])
@@ -209,7 +209,7 @@ def validate_service_configuration(snapshot, name):
         raise ValueError(
             "Server and LLM model/tokenizer/revision/context/endpoint must agree"
         )
-    from .models import local_snapshot
+    from ..inference.models import local_snapshot
 
     return local_snapshot(server["model"], model["revision"])
 
@@ -404,7 +404,7 @@ def service_status(name):
                     stage="external_process",
                     error=observed.get("error"),
                 )
-            from .web_runtime import capture_runtime
+            from .runtime import capture_runtime
 
             runtime = capture_runtime(current)
             record.update(
@@ -506,7 +506,7 @@ def start_service(name):
                         [
                             sys.executable,
                             "-m",
-                            "memmgr.web_services",
+                            "memmgr.webui.services",
                             name,
                             str(lock.fileno()),
                             str(read_gate),

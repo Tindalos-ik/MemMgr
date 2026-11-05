@@ -10,7 +10,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import memory
+from ..long_term import memory
 
 
 def check(config, phase, artifact=None):

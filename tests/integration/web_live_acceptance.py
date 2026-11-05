@@ -1,7 +1,7 @@
 """对已启动的真实 MemMgr WebAPI 执行安全、分页与配置事务验收，不替代任何实际服务。
 
 运行：MEMMGR_WEB_URL=http://127.0.0.1:8765 MEMMGR_TEST_WORKSPACE=<已准备并索引的隔离工作区>
-python tests/web_live_acceptance.py。测试必须独占后端，会临时修改关联配置及所选隔离清单后恢复。
+python tests/integration/web_live_acceptance.py。测试必须独占后端，会临时修改关联配置及所选隔离清单后恢复。
 """
 
 from __future__ import annotations

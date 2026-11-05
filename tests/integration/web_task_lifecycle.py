@@ -1,7 +1,7 @@
 """对真实隔离任务执行取消、SIGKILL 与后端冷重启验收，不使用模拟进程。
 
 显式运行：MEMMGR_WEB_URL=http://127.0.0.1:8765 MEMMGR_TEST_WORKSPACE=<自行准备并索引的隔离工作区>
-MEMMGR_ALLOW_BACKEND_RESTART=1 python tests/web_task_lifecycle.py。
+MEMMGR_ALLOW_BACKEND_RESTART=1 python tests/integration/web_task_lifecycle.py。
 该测试会终止当前自有 Web 后端，测试后需重新启动持久服务。
 """
 
@@ -19,7 +19,7 @@ import unittest
 import httpx
 import psutil
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class LiveTaskLifecycle(unittest.TestCase):
@@ -123,7 +123,7 @@ class LiveTaskLifecycle(unittest.TestCase):
         task = self.create()
         self.wait_state(task, child=True)
         process = psutil.Process(task["pid"])
-        self.assertIn("memmgr.web_tasks", process.cmdline())
+        self.assertIn("memmgr.webui.tasks", process.cmdline())
         self.assertIn(task["id"], process.cmdline())
         stat = Path(f"/proc/{process.pid}/stat").read_text()
         self.assertEqual(
@@ -179,7 +179,7 @@ class LiveTaskLifecycle(unittest.TestCase):
         self.assertTrue(stream_started.wait(timeout=60))
         health = self.client.get("/api/health").raise_for_status().json()
         backend = psutil.Process(health["backend"]["pid"])
-        self.assertIn("memmgr.web:app", backend.cmdline())
+        self.assertIn("memmgr.webui.app:app", backend.cmdline())
         backend.send_signal(signal.SIGKILL)
         future.result(timeout=30)
         pool.shutdown(wait=True)
@@ -226,8 +226,8 @@ class LiveTaskLifecycle(unittest.TestCase):
         sys.path.insert(0, str(ROOT))
         from transformers import AutoTokenizer
 
-        from memmgr.models import local_snapshot
-        from memmgr.prompt import assemble_prompt
+        from memmgr.inference.models import local_snapshot
+        from memmgr.inference.prompt import assemble_prompt
 
         tokenizer = AutoTokenizer.from_pretrained(
             local_snapshot(
@@ -352,7 +352,7 @@ class LiveTaskLifecycle(unittest.TestCase):
                     sys.executable,
                     "-m",
                     "uvicorn",
-                    "memmgr.web:app",
+                    "memmgr.webui.app:app",
                     "--host",
                     "127.0.0.1",
                     "--port",

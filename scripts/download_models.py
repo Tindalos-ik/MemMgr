@@ -13,7 +13,7 @@ from huggingface_hub import snapshot_download
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from memmgr.models import IGNORED_MODEL_FILES
+from memmgr.inference.models import IGNORED_MODEL_FILES
 
 
 def main() -> None:

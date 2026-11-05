@@ -10,10 +10,10 @@ import asyncio
 import json
 from pathlib import Path
 
-from .data import load_config, prepare
-from .index import index_tier
-from .rag_batch import run_rag_benchmark
-from .retrieval_batch import run_retrieval_benchmark
+from .long_term.data import load_config, prepare
+from .long_term.index import index_tier
+from .benchmarks.rag_batch import run_rag_benchmark
+from .benchmarks.retrieval_batch import run_retrieval_benchmark
 
 
 def build_parser():
@@ -118,7 +118,7 @@ def dispatch_memory(config, args):
 
     缺少 text/id 时抛出 ValueError，命名空间与持久化行为由 memory 模块负责。
     """
-    from . import memory
+    from .long_term import memory
     namespace = args.namespace
     if args.memory_cmd == 'add':
         if args.text is None:
@@ -196,7 +196,7 @@ def main():
     elif args.cmd == 'matrix':
         write_matrix(config, args.tiers, args.concurrencies)
     elif args.cmd == 'function-check':
-        from .memory_check import check
+        from .benchmarks.memory_check import check
         check(config, args.phase, args.artifact)
     elif args.cmd == 'memory':
         dispatch_memory(config, args)

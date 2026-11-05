@@ -19,8 +19,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from memmgr.index import index_collection_name, index_identity, index_tier
-from memmgr.resources import sample
+from memmgr.long_term.index import index_collection_name, index_identity, index_tier
+from memmgr.benchmarks.resources import sample
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,10 +32,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def snapshot_application_code() -> dict[str, str]:
-    """返回 `memmgr/*.py` 的相对路径与SHA256映射。"""
+    """返回 `memmgr/` 下所有 Python 源码的相对路径与 SHA256 映射。"""
     return {
         str(path): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted(Path("memmgr").glob("*.py"))
+        for path in sorted(Path("memmgr").rglob("*.py"))
     }
 
 

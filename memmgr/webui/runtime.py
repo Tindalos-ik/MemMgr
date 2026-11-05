@@ -7,7 +7,7 @@ import time
 import httpx
 import psutil
 
-from .models import local_snapshot
+from ..inference.models import local_snapshot
 
 
 def capture_runtime(snapshot, require_llm=False):

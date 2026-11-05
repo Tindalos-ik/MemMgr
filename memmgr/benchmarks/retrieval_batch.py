@@ -15,8 +15,8 @@ import time
 import uuid
 from pathlib import Path
 
-from .index import make_embedder
-from .retrieval import load_queries_and_qrels, open_collection, score_retrieval
+from ..long_term.index import make_embedder
+from ..long_term.retrieval import load_queries_and_qrels, open_collection, score_retrieval
 from .run_metadata import write_run_metadata, finish_environment_snapshot
 
 
