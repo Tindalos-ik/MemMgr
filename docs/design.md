@@ -2,7 +2,7 @@
 
 ## 1. 数据与抽样
 
-使用 BEIR SciFact：语料为论文标题和摘要，查询为科学论断，相关性标签采用官方 test qrels。数据来源与许可见[实测报告](../reports/本机基线实测报告.md#数据)。
+使用 BEIR SciFact：语料为论文标题和摘要，查询为科学论断，相关性标签采用官方 test qrels。数据来源与许可见[实测报告](../reports/Tindalos-ik_test_report.md#数据)。
 
 从同时存在于查询文件和 qrels 的问题中，用种子 7 抽取 30 个，再按 ID 字符串排序。三层语料逐级扩充，每层均保留所选问题的全部正相关文献，其余文献随机补足。
 
@@ -119,7 +119,7 @@ Web 实验启用 `_web_fail_fast`，请求失败后保存错误并终止该任�
 
 ## 6. 执行与查看结果
 
-先按[部署说明](部署.md)安装依赖、下载模型并启动 vLLM 与 Chroma。以下命令在 Linux / WSL 项目根目录执行：
+先按[部署说明](deploy.md)安装依赖、下载模型并启动 vLLM 与 Chroma。以下命令在 Linux / WSL 项目根目录执行：
 
 `prepare` 会重写目标数据目录，复跑前确认配置。测量首次导入需独立的数据目录和持久化环境；已有索引会复用，只记录本次查找耗时，并关联历史首次导入来源。保留已有数据和正式结果。
 
@@ -148,4 +148,4 @@ export PYTHON="$PWD/.venv/bin/python"
 "$PYTHON" scripts/summarize_baseline.py .agent/executions/execution-YYYYMMDD-HHMMSS
 ```
 
-汇总写入 `.agent/results/`，不重新执行实验。实测数值、图表和回答示例见[本机基线实测报告](../reports/本机基线实测报告.md)。
+汇总写入 `.agent/results/`，不重新执行实验。实测数值、图表和回答示例见[本机基线实测报告](../reports/Tindalos-ik_test_report.md)。
