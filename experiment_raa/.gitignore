@@ -1,0 +1,13 @@
+# 本地环境与模型、计算缓存
+/.venv/
+/hf/
+/xet/
+/vllm-cache/
+/triton-cache/
+/torch-cache/
+__pycache__/
+
+# 实验运行产物
+/results*/
+/environment.json
+/server.log
