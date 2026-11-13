@@ -3,6 +3,7 @@
 import hashlib
 import importlib.metadata
 import json
+import math
 from pathlib import Path
 import time
 
@@ -25,14 +26,15 @@ class ReusePolicy(LRUCachePolicy):
         super().__init__(capacity)
         self.manager = manager
 
-    def evict(self, n, protected):
-        """原子淘汰 n 个空闲块，跳过 protected 和本次写入前缀。"""
-        started = time.perf_counter()
+    def plan(self, n, protected, current_root):
+        """为 n 个块生成只读淘汰方案，跳过 protected 和 current_root 前缀，返回候选块与评分。"""
+        if n == 0:
+            return [], []
         manager = self.manager
         groups = {}
         for rank, key in enumerate(self.evictable_blocks):
             root, position = manager.owners[key]
-            if key not in protected and root != manager.store_root:
+            if key not in protected and root != current_root:
                 if self.blocks[key].ref_cnt != 0:
                     raise RuntimeError("Eviction candidate is pinned")
                 groups.setdefault(root, []).append((key, position, rank))
@@ -44,13 +46,24 @@ class ReusePolicy(LRUCachePolicy):
         ranked = sorted(zip(roots, scores), key=lambda item: (item[1], min(k[2] for k in groups[item[0]])))
         candidates = [(key, self.blocks[key]) for root, _ in ranked
                       for key, _, _ in sorted(groups[root], key=lambda item: -item[1])][:n]
+        details = [dict(root=root, features=vector, score=score,
+                        keys=[key.hex() for key, _, _ in groups[root]])
+                   for root, vector, score in zip(roots, features, scores)]
+        return candidates, details
+
+    def evict(self, n, protected):
+        """按只读方案原子淘汰 n 个空闲块，跳过 protected 和本次写入前缀。"""
+        started = time.perf_counter()
+        manager = self.manager
+        plan = self.plan(n, protected, manager.store_root)
+        if plan is None:
+            return None
+        candidates, details = plan
         for key, _ in candidates:
             self.remove(key)
         manager.emit("evict", request_id=manager.store_request, n=n,
                      protected=[key.hex() for key in protected],
-                     candidates=[dict(root=root, features=vector, score=score,
-                                      keys=[key.hex() for key, _, _ in groups[root]])
-                                 for root, vector, score in zip(roots, features, scores)],
+                     candidates=details,
                      keys=[key.hex() for key, _ in candidates],
                      policy_seconds=time.perf_counter() - started)
         return candidates
@@ -120,7 +133,30 @@ class ReuseManager(CPUOffloadingManager):
         keys = list(keys)
         if any(key not in state["positions"] for key in keys):
             raise RuntimeError("Decode or unknown block offered for prompt-only store")
-        selected = keys if state["accepted"] else []
+        if self.mode == "learned" and "write_accepted" not in state:
+            started = time.perf_counter()
+            missing = [key for key in state["keys"] if self._policy.get(key) is None]
+            required = max(0, len(missing) - self._get_num_free_blocks())
+            candidates, details = [], []
+            if state["accepted"] and required:
+                plan = self._policy.plan(required, set(state["keys"]), state["root"])
+                if plan is None:
+                    raise RuntimeError("Cannot reserve complete prefix with current pinned blocks")
+                candidates, details = plan
+            scores = {item["root"]: item["score"] for item in details}
+            incoming = len(missing) * state["score"]
+            displaced = math.fsum(scores[self.owners[key][0]] for key, _ in candidates)
+            state["write_accepted"] = state["accepted"] and (not required or incoming > displaced)
+            self.emit("retain", request_id=req_context.req_id, missing=[key.hex() for key in missing],
+                      required_blocks=required, candidates=details,
+                      victims=[key.hex() for key, _ in candidates],
+                      incoming_value=incoming, displaced_value=displaced,
+                      accepted=state["write_accepted"],
+                      reason="reuse-threshold" if not state["accepted"] else (
+                          "free-capacity" if not required else "replacement-value"),
+                      policy_seconds=time.perf_counter() - started)
+        accepted = state["write_accepted"] if self.mode == "learned" else state["accepted"]
+        selected = keys if accepted else []
         self.store_root, self.store_request = state["root"], req_context.req_id
         try:
             output = super().prepare_store(selected, req_context)
@@ -135,7 +171,7 @@ class ReuseManager(CPUOffloadingManager):
         if len(self.owners) > self._num_blocks or len(self.owners) != len(self._policy.blocks):
             raise RuntimeError("CPU block ownership or capacity mismatch")
         self.emit("store", request_id=req_context.req_id,
-                  offered=[key.hex() for key in keys], accepted=state["accepted"],
+                  offered=[key.hex() for key in keys], accepted=accepted,
                   keys=[key.hex() for key in output.keys_to_store],
                   evicted=[key.hex() for key in output.evicted_keys], resident_blocks=len(self.owners))
         return output

@@ -120,6 +120,7 @@ def main():
     parser.add_argument("--output-tokens", type=int, default=32)
     parser.add_argument("--port", type=int, default=18083)
     parser.add_argument("--seed", type=int, default=53)
+    parser.add_argument("--evaluation-seed", type=int, default=20053)
     args = parser.parse_args()
     if (args.collect_rounds < 4 or args.rounds < 2 or not 1 <= args.horizon <= 24
             or not 1 <= args.output_tokens <= 128 or not 1 <= args.port <= 65535):
@@ -175,7 +176,7 @@ def main():
     train(args.output, args.horizon, args.seed)
     frozen = {name: digest(args.output / name) for name in ("model.json", "model.joblib", "samples.jsonl")}
     for epoch, modes in enumerate((("lru", "admission", "learned"), ("learned", "admission", "lru"))):
-        plan = make_plan(tokenizer, args.rounds, args.seed + 10000 + epoch)
+        plan = make_plan(tokenizer, args.rounds, args.evaluation_seed + epoch)
         save(args.output / f"evaluate-trace-{epoch}.json", plan)
         for mode in modes:
             run_service(args, f"e{epoch}-{mode}", mode, plan, context)

@@ -1,7 +1,7 @@
 """从原始请求、传输生命周期和指标快照复核 GBDT 策略、时间隔离与配对性能。"""
 
 import argparse
-from collections import defaultdict, OrderedDict
+from collections import OrderedDict
 import hashlib
 import json
 import math
@@ -24,6 +24,29 @@ def counters(path):
             if sample.name.endswith(("_total", "_sum", "_count")):
                 result[sample.name] = result.get(sample.name, 0) + sample.value
     return result
+
+
+def eviction_plan(cache, evictable, history, predictor, current_root, protected, n):
+    """从重建的 cache/evictable 生成 n 块方案；history/predictor 评分，保护 current_root 和 protected。"""
+    if n == 0:
+        return [], []
+    groups = {}
+    for rank, key in enumerate(evictable):
+        block = cache[key]
+        if key not in protected and block["root"] != current_root:
+            groups.setdefault(block["root"], []).append((key, block["position"], rank))
+    roots = list(groups)
+    vectors = [history.features(root) for root in roots]
+    scores = predictor.score(vectors)
+    details = [dict(root=root, features=vector, score=score,
+                    keys=[key for key, _, _ in groups[root]])
+               for root, vector, score in zip(roots, vectors, scores)]
+    ranked = sorted(zip(roots, scores), key=lambda item: (item[1], min(k[2] for k in groups[item[0]])))
+    chosen = [key for root, _ in ranked
+              for key, _, _ in sorted(groups[root], key=lambda item: -item[1])][:n]
+    if len(chosen) != n:
+        raise ValueError("Insufficient unpinned capacity for complete prefix")
+    return chosen, details
 
 
 def audit_cache(directory, predictor):
@@ -54,7 +77,7 @@ def audit_cache(directory, predictor):
             resident = [key for key in event["keys"] if key in cache and cache[key]["ref"] >= 0]
             if resident != event["resident"]:
                 raise ValueError("Ready CPU snapshot differs from completed stores")
-            requests[req_id] = dict(begin=event, lookup=[], store_keys=[], load_keys=[],
+            requests[req_id] = dict(begin=event, lookup=[], store_keys=[], load_keys=[], write_accepted=None,
                                     policy_seconds=event["policy_seconds"])
         elif kind == "lookup":
             state = requests[req_id]
@@ -62,24 +85,34 @@ def audit_cache(directory, predictor):
             for key in reversed(state["begin"]["keys"]):
                 if key in evictable:
                     evictable.move_to_end(key)
+        elif kind == "retain":
+            state = requests[req_id]
+            begin = state["begin"]
+            if initial["mode"] != "learned" or state["write_accepted"] is not None:
+                raise ValueError("Unexpected or repeated prefix admission")
+            missing = [key for key in begin["keys"] if key not in cache]
+            required = max(0, len(missing) - (capacity - len(cache)))
+            victims, details = [], []
+            if begin["accepted"] and required:
+                victims, details = eviction_plan(cache, evictable, history, predictor, begin["root"], set(begin["keys"]), required)
+            scores = {key: item["score"] for item in details for key in item["keys"]}
+            incoming = len(missing) * begin["score"]
+            displaced = math.fsum(scores[key] for key in victims)
+            accepted = begin["accepted"] and (not required or incoming > displaced)
+            reason = "reuse-threshold" if not begin["accepted"] else (
+                "free-capacity" if not required else "replacement-value")
+            if (event["missing"] != missing or event["required_blocks"] != required
+                    or event["victims"] != victims or event["candidates"] != details
+                    or event["incoming_value"] != incoming or event["displaced_value"] != displaced
+                    or event["accepted"] != accepted or event["reason"] != reason):
+                raise ValueError("Complete-prefix replacement value or admission mismatch")
+            state["write_accepted"] = accepted
+            state["policy_seconds"] += event["policy_seconds"]
         elif kind == "evict":
             if initial["mode"] != "learned" or pending_eviction is not None:
                 raise ValueError("Unexpected learned eviction")
-            groups = {}
             current_root = requests[req_id]["begin"]["root"]
-            for rank, key in enumerate(evictable):
-                block = cache[key]
-                if key not in event["protected"] and block["root"] != current_root:
-                    groups.setdefault(block["root"], []).append((key, block["position"], rank))
-            roots = list(groups)
-            vectors = [history.features(root) for root in roots]
-            scores = predictor.score(vectors)
-            expected_candidates = [dict(root=root, features=vector, score=score,
-                                        keys=[key for key, _, _ in groups[root]])
-                                   for root, vector, score in zip(roots, vectors, scores)]
-            ranked = sorted(zip(roots, scores), key=lambda item: (item[1], min(k[2] for k in groups[item[0]])))
-            chosen = [key for root, _ in ranked
-                      for key, _, _ in sorted(groups[root], key=lambda item: -item[1])][:event["n"]]
+            chosen, expected_candidates = eviction_plan(cache, evictable, history, predictor, current_root, set(event["protected"]), event["n"])
             if expected_candidates != event["candidates"] or chosen != event["keys"] or len(chosen) != event["n"]:
                 raise ValueError("Eviction differs from frozen scores, LRU ties or tail-first order")
             pending_eviction = event
@@ -87,15 +120,18 @@ def audit_cache(directory, predictor):
         elif kind == "store":
             state = requests[req_id]
             begin = state["begin"]
-            if event["accepted"] != begin["accepted"] or any(key not in begin["keys"] for key in event["offered"]):
+            accepted = state["write_accepted"] if initial["mode"] == "learned" else begin["accepted"]
+            if accepted is None or event["accepted"] != accepted or any(key not in begin["keys"] for key in event["offered"]):
                 raise ValueError("Store admission or offered keys changed")
-            selected = event["offered"] if begin["accepted"] else []
+            selected = event["offered"] if accepted else []
             new = [key for key in selected if key not in cache]
             n = max(0, len(new) - (capacity - len(cache)))
             if initial["mode"] == "learned":
                 expected_evicted = pending_eviction["keys"] if pending_eviction else []
                 if pending_eviction and pending_eviction["request_id"] != req_id:
                     raise ValueError("Eviction and store request differ")
+                if pending_eviction and set(pending_eviction["protected"]) != set(selected):
+                    raise ValueError("Native eviction protection differs from admitted store")
                 pending_eviction = None
             else:
                 expected_evicted = [key for key in evictable if key not in selected][:n]
@@ -211,10 +247,12 @@ def verify_run(root, name, mode, plan, predictor):
                 or len(row["generated_tokens"]) != environment["context"]["output_tokens"]
                 or len(row["token_logprobs"]) != environment["context"]["output_tokens"]):
             raise ValueError(f"Transfer, compute or output accounting mismatch: {name}/{index}")
+        accepted = audit["write_accepted"] if mode == "learned" else begin["accepted"]
         row.update(mode=mode, run=name, gpu_tokens=gpu, cpu_tokens=cpu,
                    resident_tokens=len(begin["resident"]) * 64,
                    previously_seen=begin["features"][0] > 1, policy_seconds=audit["policy_seconds"],
-                   accepted=begin["accepted"], score=begin["score"],
+                   accepted=accepted, reuse_accepted=begin["accepted"],
+                   capacity_rejected=begin["accepted"] and not accepted, score=begin["score"],
                    server_ttft_seconds=delta["vllm:time_to_first_token_seconds_sum"])
     if any(not key.startswith("cmpl-warm-") for key in audits):
         raise ValueError("Unaccounted engine requests")
@@ -248,7 +286,8 @@ def summarize(rows, reference):
                 store_bytes=sum(row["metrics"].get("vllm:kv_offload_store_bytes_total", 0) for row in rows),
                 load_bytes=sum(row["metrics"].get("vllm:kv_offload_load_bytes_total", 0) for row in rows),
                 policy_p95_ms=percentile([row["policy_seconds"] for row in rows], 0.95) * 1000,
-                accepted=sum(row["accepted"] for row in rows), rejected=sum(not row["accepted"] for row in rows))
+                accepted=sum(row["accepted"] for row in rows), rejected=sum(not row["accepted"] for row in rows),
+                capacity_rejected=sum(row["capacity_rejected"] for row in rows))
 
 
 def review(root):
