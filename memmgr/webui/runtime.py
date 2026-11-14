@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 import httpx
@@ -46,6 +47,7 @@ def capture_runtime(snapshot, require_llm=False):
                         "VLLM_USE_FLASHINFER_SAMPLER",
                         "HF_HUB_OFFLINE",
                         "TRANSFORMERS_OFFLINE",
+                        "VLLM_BATCH_INVARIANT",
                     )
                 },
             }
@@ -112,6 +114,23 @@ def capture_runtime(snapshot, require_llm=False):
                 }
             )
         model = options.get("--model")
+        from ..short_term.config import KVConfig, transfer_config
+        from .config import ROOT
+
+        kv = KVConfig.model_validate(server.get("kv_cache", {}))
+        expected_transfer = transfer_config(server, ROOT)
+        actual_transfer = options.get("--kv-transfer-config")
+        if (json.loads(actual_transfer) if actual_transfer else None) != expected_transfer:
+            runtime["differences"].append("KV transfer configuration differs")
+        expected_gpu_bytes = str(kv.gpu_bytes) if kv.gpu_bytes else None
+        if options.get("--kv-cache-memory-bytes") != expected_gpu_bytes:
+            runtime["differences"].append("GPU KV memory budget differs")
+        if expected_transfer is not None and (
+            options.get("--block-size") != str(kv.block_tokens)
+            or "--enable-prefix-caching" not in options
+            or psutil.Process(actual["pid"]).environ().get("VLLM_KV_CACHE_LAYOUT") != "LBHNC"
+        ):
+            runtime["differences"].append("KV block size, prefix caching or layout differs")
         configured = snapshot["models"][server["model"]]
         expected_snapshot = str(local_snapshot(server["model"], configured["revision"]))
         if model == server["model"]:
@@ -126,9 +145,10 @@ def capture_runtime(snapshot, require_llm=False):
                 }
             )
         for key, value in actual["environment"].items():
-            if value != server[key]:
+            expected = ("1" if kv.batch_invariant else "0") if key == "VLLM_BATCH_INVARIANT" else server[key]
+            if value != expected:
                 runtime["differences"].append(
-                    {"field": key, "configured": server[key], "actual": value}
+                    {"field": key, "configured": expected, "actual": value}
                 )
     advertised = runtime["models"].get("data", [])
     if not any(

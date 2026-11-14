@@ -220,6 +220,31 @@ def services():
     return {"services": result}
 
 
+@app.get("/api/kv")
+async def kv_status():
+    """读取当前 vLLM 的真实 KV 指标及已保存策略配置。"""
+    from prometheus_client.parser import text_string_to_metric_families
+
+    snapshot = configs()
+    url = snapshot["baseline"]["llm"]["base_url"].removesuffix("/v1") + "/metrics"
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(503, f"KV 指标读取失败：{exc}") from exc
+    metrics = []
+    for family in text_string_to_metric_families(response.text):
+        for item in family.samples:
+            if "kv_offload" in item.name or item.name in (
+                "vllm:prefix_cache_hits_total", "vllm:prefix_cache_queries_total",
+                "vllm:external_prefix_cache_hits_total", "vllm:request_prefill_kv_computed_tokens_sum",
+            ):
+                metrics.append(dict(name=item.name, labels=item.labels, value=item.value))
+    return dict(configured=snapshot["server"].get("kv_cache", {"tier": "gpu", "policy": "lru"}),
+                metrics=metrics, captured_at=time.time())
+
+
 @app.post("/api/services/{name}/start")
 def service_start(name: str, value: dict):
     """以空 value 请求启动固定 name 服务，保留共享资源冲突及原始错误。"""
