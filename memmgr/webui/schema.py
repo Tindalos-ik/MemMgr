@@ -3,6 +3,7 @@
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+from ..short_term.config import KVConfig
 
 
 class StrictConfig(BaseModel):
@@ -114,3 +115,4 @@ class ServerConfig(StrictConfig):
     prefix_caching: str
     chunked_prefill: str
     concurrency_semantics: str
+    kv_cache: KVConfig = Field(default_factory=KVConfig)

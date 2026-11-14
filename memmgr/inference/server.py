@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from .models import local_snapshot
+from ..short_term.config import KVConfig, transfer_config
 
 
 def launch(server_path, models_path):
@@ -49,6 +50,15 @@ def launch(server_path, models_path):
     ]
     if server["enforce_eager"]:
         argv.append("--enforce-eager")
+    kv = KVConfig.model_validate(server.get("kv_cache", {}))
+    os.environ["VLLM_BATCH_INVARIANT"] = "1" if kv.batch_invariant else "0"
+    transfer = transfer_config(server, Path(__file__).resolve().parents[2])
+    if kv.gpu_bytes:
+        argv += ["--kv-cache-memory-bytes", str(kv.gpu_bytes)]
+    if transfer is not None:
+        argv += ["--block-size", str(kv.block_tokens), "--enable-prefix-caching",
+                 "--kv-transfer-config", json.dumps(transfer)]
+        os.environ["VLLM_KV_CACHE_LAYOUT"] = "LBHNC"
     for key in (
         "HF_HUB_OFFLINE",
         "TRANSFORMERS_OFFLINE",

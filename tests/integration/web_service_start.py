@@ -251,6 +251,24 @@ class ServiceStartup(unittest.TestCase):
         )
         print("unknown_listener", response.status_code, record["error"], flush=True)
 
+    def test_offline_status_latency(self):
+        """所选服务端口离线时及时返回状态，保留健康错误及后端可用状态。"""
+        for path in ("/api/services", "/api/health"):
+            started = time.monotonic()
+            response = self.client.get(path).raise_for_status()
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 4, (path, elapsed, response.text))
+            value = response.json()
+            if path == "/api/services":
+                self.assertEqual(set(value["services"]), {"vllm", "chroma"})
+                observed = value["services"]["vllm"]["configured_health"]
+            else:
+                self.assertEqual(value["backend"]["status"], "ok")
+                observed = value["vllm"]
+            self.assertEqual(observed["status"], "unavailable", observed)
+            self.assertTrue(observed["error"], observed)
+            print("offline_status", path, elapsed, observed, flush=True)
+
     def test_real_no_gpu_start_and_restart(self):
         """通过 API 实际启动无 GPU 的 vLLM，验证共享锁、防重复、真实失败日志及后端重启发现。"""
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:

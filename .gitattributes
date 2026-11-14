@@ -1,0 +1,30 @@
+* text=auto
+
+*.sh text eol=lf
+*.bash text eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.webp binary
+*.pdf  binary
+*.zip  binary
+*.7z   binary
+*.gz   binary
+*.exe  binary
+*.dll  binary
+*.so   binary
+*.a    binary
+*.lib  binary
+*.o    binary
+*.obj  binary
+*.class binary
+*.pyc  binary
+
+*.py diff=python

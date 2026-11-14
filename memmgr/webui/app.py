@@ -181,8 +181,10 @@ async def health():
     from .runtime import capture_runtime
 
     snapshot = configs()
-    result.update(await health_snapshot(snapshot["baseline"]))
-    runtime = await owned_thread(capture_runtime, snapshot)
+    observed, runtime = await asyncio.gather(
+        health_snapshot(snapshot["baseline"]), owned_thread(capture_runtime, snapshot)
+    )
+    result.update(observed)
     result["vllm"].update(
         configuration_matches=runtime["configuration_matches"],
         restart_required=result["vllm"]["status"] == "ok"
@@ -193,31 +195,64 @@ async def health():
     return result
 
 
+def refresh_chroma_logs():
+    """在专用线程中恢复当前 Chroma 日志订阅，锁内核对已有跟随进程。"""
+    from .logs import ChromaLogs
+
+    with app.state.chroma_log_lock:
+        follower = app.state.chroma_follower
+        if follower is None or follower.process.poll() is not None:
+            if follower is not None:
+                follower.close()
+            try:
+                app.state.chroma_follower = ChromaLogs(
+                    configs()["baseline"]["resources"]["chroma_container"]
+                )
+            except OSError as exc:
+                save_json(
+                    STATE / "chroma-log-status.json",
+                    {"available": False, "reason": f"{type(exc).__name__}: {exc}"},
+                )
+                app.state.chroma_follower = None
+
+
 @app.get("/api/services")
-def services():
-    """重新发现两个固定服务的真实健康、启动状态及进程归属。"""
+async def services():
+    """并行发现两个固定服务的真实健康、启动状态及进程归属。"""
     from .services import NAMES, service_status
 
-    result = {name: service_status(name) for name in NAMES}
+    statuses = await asyncio.gather(
+        *(owned_thread(service_status, name) for name in NAMES)
+    )
+    result = dict(zip(NAMES, statuses))
     if result["chroma"]["status"] == "running":
-        from .logs import ChromaLogs
-
-        with app.state.chroma_log_lock:
-            follower = app.state.chroma_follower
-            if follower is None or follower.process.poll() is not None:
-                if follower is not None:
-                    follower.close()
-                try:
-                    app.state.chroma_follower = ChromaLogs(
-                        configs()["baseline"]["resources"]["chroma_container"]
-                    )
-                except OSError as exc:
-                    save_json(
-                        STATE / "chroma-log-status.json",
-                        {"available": False, "reason": f"{type(exc).__name__}: {exc}"},
-                    )
-                    app.state.chroma_follower = None
+        await owned_thread(refresh_chroma_logs)
     return {"services": result}
+
+
+@app.get("/api/kv")
+async def kv_status():
+    """读取当前 vLLM 的真实 KV 指标及已保存策略配置。"""
+    from prometheus_client.parser import text_string_to_metric_families
+
+    snapshot = configs()
+    url = snapshot["baseline"]["llm"]["base_url"].removesuffix("/v1") + "/metrics"
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(503, f"KV 指标读取失败：{exc}") from exc
+    metrics = []
+    for family in text_string_to_metric_families(response.text):
+        for item in family.samples:
+            if "kv_offload" in item.name or item.name in (
+                "vllm:prefix_cache_hits_total", "vllm:prefix_cache_queries_total",
+                "vllm:external_prefix_cache_hits_total", "vllm:request_prefill_kv_computed_tokens_sum",
+            ):
+                metrics.append(dict(name=item.name, labels=item.labels, value=item.value))
+    return dict(configured=snapshot["server"].get("kv_cache", {"tier": "gpu", "policy": "lru"}),
+                metrics=metrics, captured_at=time.time())
 
 
 @app.post("/api/services/{name}/start")

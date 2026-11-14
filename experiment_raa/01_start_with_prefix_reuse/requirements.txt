@@ -1,0 +1,6 @@
+vllm==0.29.0
+torch==2.13.0
+transformers==5.22.2
+huggingface-hub==2.4.0
+httpx==0.28.1
+prometheus-client==0.26.0
