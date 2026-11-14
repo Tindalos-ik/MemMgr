@@ -1,6 +1,4 @@
-# 用途：管理 compose 中的 Chroma 服务，保留命名卷中的持久化数据。
-# 用法：`bash scripts/chroma.sh [up|stop|restart|status]`；省略参数时执行 up。
-# 前提：WSL 可调用 Docker Compose v2；`PROJECT_ROOT` 可指定项目目录。
+# """管理 Chroma 持久服务；参数为 up/stop/restart/status，PROJECT_ROOT 指定项目目录。"""
 set -euo pipefail
 cd "${PROJECT_ROOT:-$(dirname "$(realpath "$0")")/..}"
 case "${1:-up}" in

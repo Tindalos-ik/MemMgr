@@ -181,8 +181,10 @@ async def health():
     from .runtime import capture_runtime
 
     snapshot = configs()
-    result.update(await health_snapshot(snapshot["baseline"]))
-    runtime = await owned_thread(capture_runtime, snapshot)
+    observed, runtime = await asyncio.gather(
+        health_snapshot(snapshot["baseline"]), owned_thread(capture_runtime, snapshot)
+    )
+    result.update(observed)
     result["vllm"].update(
         configuration_matches=runtime["configuration_matches"],
         restart_required=result["vllm"]["status"] == "ok"
@@ -193,30 +195,38 @@ async def health():
     return result
 
 
+def refresh_chroma_logs():
+    """在专用线程中恢复当前 Chroma 日志订阅，锁内核对已有跟随进程。"""
+    from .logs import ChromaLogs
+
+    with app.state.chroma_log_lock:
+        follower = app.state.chroma_follower
+        if follower is None or follower.process.poll() is not None:
+            if follower is not None:
+                follower.close()
+            try:
+                app.state.chroma_follower = ChromaLogs(
+                    configs()["baseline"]["resources"]["chroma_container"]
+                )
+            except OSError as exc:
+                save_json(
+                    STATE / "chroma-log-status.json",
+                    {"available": False, "reason": f"{type(exc).__name__}: {exc}"},
+                )
+                app.state.chroma_follower = None
+
+
 @app.get("/api/services")
-def services():
-    """重新发现两个固定服务的真实健康、启动状态及进程归属。"""
+async def services():
+    """并行发现两个固定服务的真实健康、启动状态及进程归属。"""
     from .services import NAMES, service_status
 
-    result = {name: service_status(name) for name in NAMES}
+    statuses = await asyncio.gather(
+        *(owned_thread(service_status, name) for name in NAMES)
+    )
+    result = dict(zip(NAMES, statuses))
     if result["chroma"]["status"] == "running":
-        from .logs import ChromaLogs
-
-        with app.state.chroma_log_lock:
-            follower = app.state.chroma_follower
-            if follower is None or follower.process.poll() is not None:
-                if follower is not None:
-                    follower.close()
-                try:
-                    app.state.chroma_follower = ChromaLogs(
-                        configs()["baseline"]["resources"]["chroma_container"]
-                    )
-                except OSError as exc:
-                    save_json(
-                        STATE / "chroma-log-status.json",
-                        {"available": False, "reason": f"{type(exc).__name__}: {exc}"},
-                    )
-                    app.state.chroma_follower = None
+        await owned_thread(refresh_chroma_logs)
     return {"services": result}
 
 

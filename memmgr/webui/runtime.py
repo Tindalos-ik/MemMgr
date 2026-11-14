@@ -63,7 +63,7 @@ def capture_runtime(snapshot, require_llm=False):
     try:
         response = httpx.get(
             snapshot["baseline"]["llm"]["base_url"] + "/models",
-            timeout=5,
+            timeout=httpx.Timeout(5, connect=1),
             trust_env=False,
         )
         response.raise_for_status()
