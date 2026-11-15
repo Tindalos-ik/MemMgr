@@ -4,9 +4,71 @@
 # 可重新下载的数据集
 /data/
 
-# Python 字节码
+# Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.cover
+*.egg
+*.manifest
+*.mo
+*.pot
+*.py,cover
+*.sage.py
+*.so
+*.spec
+.cache
+.dmypy.json
+.installed.cfg
+.ipynb_checkpoints
+.pdm.toml
+.Python
+.python-version
+.ropeproject
+.scrapy
+.spyderproject
+.spyproject
+.webassets-cache
+celerybeat.pid
+celerybeat-schedule
+coverage.xml
+db.sqlite3
+db.sqlite3-journal
+dmypy.json
+ipython_config.py
+local_settings.py
+nosetests.xml
+pip-delete-this-directory.txt
+Pipfile.lock
+pip-log.txt
+poetry.lock
+poetry.toml
+pyrightconfig.json
+/site
+.eggs/
+.hypothesis/
+.nox/
+.pybuilder/
+.pyre/
+.pytype/
+.tox/
+__pypackages__/
+cover/
+cython_debug/
+develop-eggs/
+docs/_build/
+downloads/
+eggs/
+instance/
+lib/
+lib64/
+parts/
+profile_default/
+sdist/
+share/python-wheels/
+target/
+var/
+wheels/
 
 # 测试、类型检查与覆盖率缓存
 .pytest_cache/
@@ -17,19 +79,18 @@ __pycache__/
 htmlcov/
 
 # 本地 Python 环境
-.venv/
+.venv
 venv/
 env/
 ENV/
 
 # 构建产物
-/build/
-/dist/
+build/
+dist/
 *.egg-info/
 
 # Web 前端依赖与生成产物；保留源码和 package-lock
 /web/node_modules/
-/web/dist/
 /web/*.tsbuildinfo
 
 # 日志与临时文件
@@ -54,4 +115,39 @@ ENV/
 .vscode/
 .DS_Store
 Thumbs.db
-Desktop.ini
+[Dd]esktop.ini
+*.cab
+*.icloud
+*.iml
+*.ipr
+*.iws
+*.lnk
+*.msi
+*.msix
+*.msm
+*.msp
+*.stackdump
+*.vsix
+._*
+.apdisk
+.AppleDB
+.AppleDesktop
+.AppleDouble
+.com.apple.timemachine.donotpresent
+.directory
+.DocumentRevisions-V100
+.fseventsd
+.fuse_hidden*
+.history
+.ionide
+.LSOverride
+.nfs*
+.Spotlight-V100
+.TemporaryItems
+.Trash-*
+.Trashes
+.VolumeIcon.icns
+atlassian-ide-plugin.xml
+$RECYCLE.BIN/
+.idea_modules/
+cmake-build-*/

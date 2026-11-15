@@ -107,6 +107,9 @@ def validate_configs(all_configs):
     baseline, models, server = (all_configs[name] for name in NAMES)
     BaselineConfig.model_validate(baseline)
     ServerConfig.model_validate(server)
+    from ..short_term.config import transfer_config
+
+    transfer_config(server, ROOT)
     if not isinstance(models, dict) or set(models) != {
         "Qwen/Qwen2.5-1.5B-Instruct",
         "BAAI/bge-small-en-v1.5",

@@ -51,10 +51,10 @@
 - [start-webui.sh](start-webui.sh)：从项目根目录启动本机 WebUI。
 - `.env.webui`（本机可选）：指定 WebUI 启动使用的 `PYTHON` 解释器，不提交到 Git。
 - 文档与报告：
-  - [docs/部署.md](docs/部署.md)：依赖安装、启动、使用、停止与常见问题。
-  - [docs/实验设计.md](docs/实验设计.md)：数据抽样、实验分组、参数、指标口径与复现命令。
+  - [docs/部署.md](docs/deploy.md)：依赖安装、启动、使用、停止与常见问题。
+  - [docs/实验设计.md](docs/design.md)：数据抽样、实验分组、参数、指标口径与复现命令。
   - [docs/目录与协作.md](docs/目录与协作.md)：包边界、模块职责、共享入口负责人和开发测试命令。
-  - [reports/本机基线实测报告.md](reports/本机基线实测报告.md)：实测结果、图表与问答示例。
+  - [reports/本机基线实测报告.md](reports/Tindalos-ik_test_report.md)：实测结果、图表与问答示例。
 - 配置文件：
   - [config/baseline.json](config/baseline.json)：数据集、检索、生成与实验参数。
   - [config/models.json](config/models.json)：模型 ID 与固定 revision。
