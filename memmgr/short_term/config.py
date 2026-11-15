@@ -11,7 +11,7 @@ class KVConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
     tier: Literal["gpu", "cpu", "ssd"] = "gpu"
-    policy: Literal["lru", "admission", "learned"] = "lru"
+    policy: Literal["lru", "admission", "learned", "placement"] = "lru"
     batch_invariant: bool = False
     block_tokens: Literal[64] = 64
     gpu_bytes: int = Field(default=0, ge=0, le=64 * 2**30)
@@ -21,6 +21,7 @@ class KVConfig(BaseModel):
     model_dir: str = ""
     restore: Literal["always", "never", "gate"] = "always"
     cost_profile: str = ""
+    placement_profile: str = ""
     margin_ms: float = Field(default=0.5, ge=0, allow_inf_nan=False)
     audit_path: str = ".agent/kv-events.jsonl"
 
@@ -37,6 +38,8 @@ class KVConfig(BaseModel):
             raise ValueError("Cost gate requires an explicit calibrated cost_profile")
         if self.tier == "ssd" and self.restore != "always":
             raise ValueError("SSD cost gating requires a separately validated promotion cost model")
+        if self.policy == "placement" and (self.tier != "ssd" or not self.placement_profile):
+            raise ValueError("Placement requires SSD tier and a calibrated placement_profile")
         return self
 
 
@@ -56,7 +59,7 @@ def transfer_config(server, root):
     options = config.model_dump()
     for field in ("ssd_root", "audit_path"):
         options[field] = str(local_path(options[field], root))
-    for field in ("model_dir", "cost_profile"):
+    for field in ("model_dir", "cost_profile", "placement_profile"):
         if options[field]:
             path = local_path(options[field], root)
             if not path.exists():
@@ -72,10 +75,11 @@ def transfer_config(server, root):
                  gpu_bytes=config.gpu_bytes)
     if config.tier == "ssd":
         directory = str(Path(options["ssd_root"]) / "invariant-vllm-0.29.0")
-        extra.update(spec_name="ManagedTieringSpec", spec_module_path="memmgr.short_term.connector",
-                     secondary_tiers=[dict(type="ManagedFileSystemTier", module_path="memmgr.short_term.connector",
+        extra.update(spec_name="PlacementTieringSpec", spec_module_path="memmgr.short_term.placement_connector",
+                     secondary_tiers=[dict(type="BoundedFileSystemTier", module_path="memmgr.short_term.placement_connector",
                                            root_dir=directory, n_read_threads=4, n_write_threads=4)])
     else:
         extra.update(spec_name="ManagedCPUSpec", spec_module_path="memmgr.short_term.connector")
-    return dict(kv_connector="ManagedConnector", kv_role="kv_both",
-                kv_connector_module_path="memmgr.short_term.connector", kv_connector_extra_config=extra)
+    return dict(kv_connector="PlacementConnector" if config.tier == "ssd" else "ManagedConnector", kv_role="kv_both",
+                kv_connector_module_path="memmgr.short_term.placement_connector" if config.tier == "ssd" else "memmgr.short_term.connector",
+                kv_connector_extra_config=extra)

@@ -69,6 +69,13 @@ class Predictor:
         self.threshold = self.metadata["threshold"]
         if not isinstance(self.threshold, (float, int)) or not 0 <= self.threshold <= 1:
             raise ValueError("Invalid GBDT threshold")
+        self.delay_model = None
+        if "delay_sha256" in self.metadata:
+            if hashlib.sha256((directory / "delay.joblib").read_bytes()).hexdigest() != self.metadata["delay_sha256"]:
+                raise ValueError("Reuse interval model digest mismatch")
+            self.delay_model = joblib.load(directory / "delay.joblib")
+            if self.delay_model.n_features_in_ != len(FEATURES):
+                raise ValueError("Unsupported reuse interval model")
 
     def score(self, vectors):
         """批量预测 vectors 中各块在观察窗口内复用的概率。"""
@@ -78,3 +85,14 @@ class Predictor:
         if not np.isfinite(values).all() or (values < 0).any() or (values > 1).any():
             raise ValueError("Invalid reuse probability")
         return values.tolist()
+
+    def delay(self, vectors):
+        """预测 vectors 各块在标签窗口内下次复用的请求间隔；超出窗口的情况由概率描述。"""
+        if self.delay_model is None:
+            raise ValueError("Placement requires a trained reuse interval model")
+        if not vectors:
+            return []
+        values = self.delay_model.predict(np.asarray(vectors, dtype=np.float32))
+        if not np.isfinite(values).all():
+            raise ValueError("Invalid predicted reuse interval")
+        return np.clip(values, 1, self.metadata["horizon"]).tolist()
