@@ -19,6 +19,8 @@ import { Workspace } from "./operations";
 export function QuestionAnswer() {
   const spaces = useApi("/workspaces");
   const history = useApi("/requests", 5000);
+  const sessions = useApi("/sessions", 5000);
+  const [sessionId, setSessionId] = useState("");
   const [workspace, setWorkspace] = useState("formal");
   const [question, setQuestion] = useState("");
   const [tier, setTier] = useState("small");
@@ -44,7 +46,14 @@ export function QuestionAnswer() {
     control.current = new AbortController();
     try {
       await ask(
-        { question, workspace, tier, top_k: topK, context_tokens: budget },
+        {
+          question,
+          workspace,
+          tier,
+          top_k: topK,
+          context_tokens: budget,
+          session_id: sessionId || undefined,
+        },
         (event, data) => {
           if (event === "delta") setAnswer((old) => old + data.text);
           else {
@@ -55,11 +64,42 @@ export function QuestionAnswer() {
         control.current.signal,
       );
       await history.refresh();
+      await sessions.refresh();
     } catch (e) {
       setError(String(e));
     } finally {
       setRunning(false);
     }
+  }
+  /** 创建当前 workspace/tier 的会话，后续发送自动追加已完成轮次。 */
+  async function createSession() {
+    const value = await api("/sessions", { workspace, tier });
+    setSessionId(value.id);
+    setAnswer("");
+    setEvents({});
+    await sessions.refresh();
+  }
+  /** 选择 id 会话并恢复它绑定的工作区与层级。 */
+  async function selectSession(id: string) {
+    if (id) {
+      const value = await api(`/sessions/${id}`);
+      setWorkspace(value.workspace);
+      setTier(value.tier);
+    }
+    setSessionId(id);
+    setAnswer("");
+    setEvents({});
+  }
+  /** 结束选中的会话，完整请求记录继续可供查阅。 */
+  async function endSession() {
+    await api(`/sessions/${sessionId}`, undefined, "DELETE");
+    setSessionId("");
+    await sessions.refresh();
+  }
+  /** 取消真实生成；会话等待服务端完成清理，单轮请求关闭连接。 */
+  async function stop() {
+    if (sessionId) await api(`/sessions/${sessionId}/cancel`, {});
+    else control.current?.abort();
   }
   /** 读取历史请求；id 为后端持久请求标识。 */
   async function load(id: string) {
@@ -75,24 +115,71 @@ export function QuestionAnswer() {
     setTier(record.input?.tier ?? "small");
     setTopK(record.input?.top_k ?? 3);
     setBudget(record.input?.context_tokens ?? 1024);
+    const session = record.session_id
+      ? await api(`/sessions/${record.session_id}`)
+      : null;
+    setSessionId(session?.status === "open" ? session.id : "");
   }
   return (
     <>
       <Card title="交互式问答">
         <div className="toolbar">
-          <Workspace
-            value={workspace}
-            change={setWorkspace}
-            workspaces={items(spaces.data)}
-          />
           <label>
-            层级
-            <select value={tier} onChange={(e) => setTier(e.target.value)}>
-              {["small", "medium", "full"].map((t) => (
-                <option key={t}>{t}</option>
-              ))}
+            会话
+            <select
+              aria-label="会话"
+              value={sessionId}
+              disabled={running}
+              onChange={(e) =>
+                perform(() => selectSession(e.target.value), setError)
+              }
+            >
+              <option value="">单轮问答</option>
+              {items(sessions.data)
+                .filter((s) => s.status === "open")
+                .map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.id.slice(0, 8)} · {s.turns.length} 轮 · {s.workspace}/
+                    {s.tier}
+                  </option>
+                ))}
             </select>
           </label>
+          <button
+            className="secondary"
+            disabled={running}
+            onClick={() => perform(createSession, setError)}
+          >
+            新建会话
+          </button>
+          <button
+            className="secondary"
+            disabled={running || !sessionId}
+            onClick={() => perform(endSession, setError)}
+          >
+            结束会话
+          </button>
+        </div>
+        <div className="toolbar">
+          <fieldset
+            className="toolbar"
+            disabled={running || !!sessionId}
+            style={{ border: 0, padding: 0, margin: 0 }}
+          >
+            <Workspace
+              value={workspace}
+              change={setWorkspace}
+              workspaces={items(spaces.data)}
+            />
+            <label>
+              层级
+              <select value={tier} onChange={(e) => setTier(e.target.value)}>
+                {["small", "medium", "full"].map((t) => (
+                  <option key={t}>{t}</option>
+                ))}
+              </select>
+            </label>
+          </fieldset>
           <label>
             候选块 Top K
             <input
@@ -132,13 +219,14 @@ export function QuestionAnswer() {
           {running && (
             <button
               className="secondary"
-              onClick={() => control.current?.abort()}
+              onClick={() => perform(stop, setError)}
             >
-              停止接收
+              取消生成
             </button>
           )}
         </div>
         <State state={spaces} />
+        <State state={sessions} />
         <ErrorBox error={error} />
       </Card>
       <Card
@@ -213,6 +301,12 @@ export function QuestionAnswer() {
                   实际纳入文献：
                   {(data.included_doc_ids ?? []).join("、") || "无"}
                 </p>
+                {sessionId && (
+                  <p className="muted">
+                    使用历史 {data.history_request_ids?.length ?? 0} 轮 ·
+                    预算省略 {data.omitted_history_turns ?? 0} 轮
+                  </p>
+                )}
                 <details>
                   <summary>展开实际 rendered prompt</summary>
                   <pre>{data.rendered_prompt}</pre>
@@ -258,9 +352,8 @@ export function QuestionAnswer() {
                 </div>
                 <p className="muted">
                   回答引用：
-                  {(data.answer?.match(/\\[DOC\\s+[^\\]]+\\]/g) ?? []).join(
-                    "、",
-                  ) || "正文未出现 [DOC id] 引用"}
+                  {(data.answer?.match(/\[DOC\s+[^\]]+\]/g) ?? []).join("、") ||
+                    "正文未出现 [DOC id] 引用"}
                 </p>
               </>
             )}

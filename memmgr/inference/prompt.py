@@ -27,7 +27,7 @@ def chat_input_ids(tokenizer, messages):
     return input_ids
 
 
-def assemble_prompt(tokenizer, query, candidates, budget):
+def assemble_prompt(tokenizer, query, candidates, budget, history=None):
     """在完整输入预算内组装问题和按排名排列的候选证据。
 
     参数：
@@ -35,6 +35,7 @@ def assemble_prompt(tokenizer, query, candidates, budget):
         query：原始问题文本。
         candidates：按检索顺序排列的 (doc_id, text) 序列。
         budget：包含系统提示、问题、引用标记和生成模板的输入上限。
+        history：可选的完整历史轮次消息；调用者负责筛选，计入相同输入预算。
 
     返回：
         消息列表、实际纳入文档 ID、证据文本、输入 ID 和截断标记。
@@ -51,8 +52,14 @@ def assemble_prompt(tokenizer, query, candidates, budget):
         "If no evidence supports an answer, say the evidence is insufficient. "
         "Never invent or cite a document absent from the evidence."
     )
+    if history is not None:
+        system += (
+            " Earlier turns provide conversation context. Use the current Evidence "
+            "for the current answer; earlier answers are not independent evidence."
+        )
     messages = [
         {"role": "system", "content": system},
+        *(history or []),
         {"role": "user", "content": f"Question: {query}\nEvidence:\n"},
     ]
     included_doc_ids = []
@@ -61,7 +68,7 @@ def assemble_prompt(tokenizer, query, candidates, budget):
 
     for doc_id, text in candidates:
         complete_evidence = evidence + f"[DOC {doc_id}] {text}\n"
-        messages[1]["content"] = f"Question: {query}\nEvidence:\n{complete_evidence}"
+        messages[-1]["content"] = f"Question: {query}\nEvidence:\n{complete_evidence}"
         if len(chat_input_ids(tokenizer, messages)) > budget:
             truncated = True
             prefix_low = 0
@@ -70,7 +77,7 @@ def assemble_prompt(tokenizer, query, candidates, budget):
             while prefix_low < prefix_high:
                 prefix_length = (prefix_low + prefix_high + 1) // 2
                 candidate_evidence = evidence + f"[DOC {doc_id}] {text[:prefix_length]}\n"
-                messages[1]["content"] = (
+                messages[-1]["content"] = (
                     f"Question: {query}\nEvidence:\n{candidate_evidence}"
                 )
                 if len(chat_input_ids(tokenizer, messages)) <= budget:
@@ -85,7 +92,7 @@ def assemble_prompt(tokenizer, query, candidates, budget):
         included_doc_ids.append(doc_id)
 
     # 统一恢复实际采用的证据，避免二分试探留下末次候选文本。
-    messages[1]["content"] = f"Question: {query}\nEvidence:\n{evidence}"
+    messages[-1]["content"] = f"Question: {query}\nEvidence:\n{evidence}"
     input_ids = chat_input_ids(tokenizer, messages)
     if len(input_ids) > budget:
         raise ValueError(

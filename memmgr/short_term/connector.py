@@ -57,7 +57,7 @@ class ManagedLRU(LRUCachePolicy):
                           if key in remaining and key not in protected and key not in parents]
             if not candidates:
                 return None
-            key = min(candidates, key=lambda key: (controller.scores[key], ranks[key]))
+            key = min(candidates, key=lambda key: (controller.eviction_value(key), ranks[key]))
             if self.blocks[key].ref_cnt != 0:
                 raise RuntimeError("Pinned block entered eviction candidates")
             chosen.append((key, self.blocks[key]))
@@ -66,7 +66,7 @@ class ManagedLRU(LRUCachePolicy):
 
     def evict(self, n, protected):
         """原子淘汰 n 个块；protected 保留调用者正在使用的块。"""
-        if self.controller.options["policy"] != "learned":
+        if self.controller.options["policy"] not in ("learned", "placement"):
             return super().evict(n, protected)
         candidates = self.plan(n, protected | self.controller.protected)
         if candidates is not None:
@@ -111,13 +111,21 @@ class PolicyController:
             missing = [key for key in keys if key not in self.scores]
             self.scores.update(zip(missing, self.predictor.score([self.history.features(key) for key in missing])))
 
+    def eviction_value(self, key):
+        """返回 key 的预计复用量，供原生 CPU 策略选择淘汰块。"""
+        return self.scores[key]
+
+    def resident_keys(self):
+        """返回必须保留访问统计的实际驻留块。"""
+        return set(self.primary._policy.blocks)
+
     def begin(self, request):
         """在 request 查找前观察所有完整前缀块，每个请求只更新一次时钟。"""
         started = time.perf_counter()
         keys = [make_offload_key(value, 0) for value in request.block_hashes]
         if len(keys) != request.num_prompt_tokens // 64:
             raise ValueError("Unexpected complete prompt hash count")
-        protected = set(self.primary._policy.blocks)
+        protected = self.resident_keys()
         protected.update(key for state in self.active.values() for key in state["keys"])
         self.history.observe(keys, 64, protected)
         for index, key in enumerate(keys):
@@ -299,10 +307,12 @@ class ManagedFileSystemTier(FileSystemTierManager):
 class ManagedTieringManager(TieringOffloadingManager):
     """保留原生 SSD 提升，使用同一控制器筛选 GPU 写入并保护缓存块。"""
 
+    controller_type = PolicyController
+
     def __init__(self, native, extra):
         """接管 native 尚未使用的原生资源；extra 提供策略配置。"""
         super().__init__(native.primary_tier, native.secondary_tiers)
-        self.control = PolicyController(self.primary_tier, extra)
+        self.control = self.controller_type(self.primary_tier, extra)
         for tier in self.secondary_tiers:
             tier.bind(self.control)
 

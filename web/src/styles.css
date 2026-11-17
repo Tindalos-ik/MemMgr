@@ -1,4 +1,4 @@
-/** MemMgr 浅色绿色实验工作台；包含键盘焦点、窄屏与 reduced-motion 支持。 */
+/** MemMgr 绿色实验工作台；包含系统深色模式、键盘焦点、窄屏与 reduced-motion 支持。 */
 :root {
   font-family:
     Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
@@ -820,5 +820,94 @@ select:disabled {
 @media (max-width: 900px) {
   .resource-values {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    background: #111b18;
+    color: #dce8e1;
+  }
+  .sidebar {
+    background: #285f4e;
+  }
+  .topbar,
+  .card,
+  .secondary,
+  .history-row,
+  .metric,
+  .collection {
+    background: #1b2923;
+    color: #dce8e1;
+  }
+  .nav-item.active,
+  .collection.selected {
+    background: #294b3e;
+    color: #a4dec2;
+  }
+  input,
+  select,
+  textarea,
+  pre,
+  .stream,
+  .log,
+  th,
+  .resource-values > div {
+    background: #14221c;
+    color: #dce8e1;
+  }
+  input:disabled,
+  select:disabled {
+    background: #24352c;
+    color: #a6b7ad;
+  }
+  .card,
+  .topbar,
+  .secondary,
+  input,
+  select,
+  textarea,
+  details,
+  .stream,
+  th,
+  td,
+  hr,
+  .history-row,
+  .collection,
+  .resource-values > div {
+    border-color: #354c40;
+  }
+  label,
+  summary,
+  .muted,
+  .empty,
+  .topbar-title,
+  .topbar-link,
+  .history-row small,
+  .resource-values span,
+  td small {
+    color: #a6b7ad;
+  }
+  .topbar-title strong,
+  .metric-action {
+    color: #dce8e1;
+  }
+  a,
+  .link {
+    color: #8bd2b2;
+  }
+  .error,
+  .danger-button {
+    background: #3d2624;
+    color: #f4b3a7;
+    border-color: #6a4039;
+  }
+  .warning {
+    background: #3a3320;
+    color: #e4cf96;
+  }
+  .success {
+    background: #203e2e;
+    color: #a2dbb4;
   }
 }
