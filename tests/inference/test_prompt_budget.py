@@ -63,5 +63,30 @@ class RealQwenPromptBudget(unittest.TestCase):
         self.assertEqual(included_doc_ids, [])
         self.assertNotIn('[DOC no-room]', messages[1]['content'])
         self.assertLessEqual(len(input_ids), len(base_ids))
+
+    def test_history_and_current_evidence_share_the_complete_budget(self):
+        """历史与本轮证据一起经过真实 tokenizer 预算，历史保持完整消息对。"""
+        history = [{"role": "user", "content": "Question: Which protein was discussed?"},
+                   {"role": "assistant", "content": "DdrB was discussed."}]
+        messages, included, evidence, ids, truncated = assemble_prompt(
+            self.tokenizer, "What does the current study establish?",
+            [("new-source", "current study detail. " * 400)], 256, history=history,
+        )
+        self.assertEqual(messages[1:3], history)
+        self.assertEqual(included, ["new-source"])
+        self.assertIn("[DOC new-source]", messages[-1]["content"])
+        self.assertTrue(truncated)
+        self.assertLessEqual(len(ids), 256)
+
+    def test_changed_current_evidence_replaces_earlier_sources(self):
+        """固定真实历史、替换当前证据，核对当前消息与实际 token 序列随之改变。"""
+        history = [{"role": "user", "content": "Question: Summarize the study."},
+                   {"role": "assistant", "content": "Earlier answer [DOC old-source]."}]
+        first = assemble_prompt(self.tokenizer, "What is supported now?", [("old-source", "old finding")], 256, history=history)
+        second = assemble_prompt(self.tokenizer, "What is supported now?", [("new-source", "new finding")], 256, history=history)
+        self.assertEqual(first[0][:-1], second[0][:-1])
+        self.assertNotEqual(first[3], second[3])
+        self.assertNotIn("old-source", second[0][-1]["content"])
+        self.assertEqual(second[1], ["new-source"])
 if __name__ == '__main__':
     unittest.main()

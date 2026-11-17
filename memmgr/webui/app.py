@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ from .config import (
     STATE,
     NAMES,
     QueryInput,
+    SessionInput,
     TaskInput,
     configs,
     effective_config,
@@ -35,6 +37,7 @@ from .config import (
 )
 from .tasks import resource_lock, start_task, read_task, cancel_task
 from .records import complete_rows, incomplete_tail
+from . import sessions
 
 
 @asynccontextmanager
@@ -43,6 +46,7 @@ async def lifespan(app):
     from ..benchmarks.resources import sample
 
     STATE.mkdir(parents=True, exist_ok=True)
+    app.state.qa_operations = {}
     from .config import save_configs
 
     if (STATE / "config-transaction.json").exists():
@@ -723,6 +727,46 @@ async def owned_thread(function, *args, **kwargs):
         raise
 
 
+@app.post("/api/sessions", status_code=201)
+def new_session(value: SessionInput):
+    """根据 value 创建绑定工作区、索引层级与模型身份的会话。"""
+    with resource_lock():
+        return sessions.create_session(value.workspace, value.tier, configs())
+
+
+@app.get("/api/sessions")
+def list_sessions(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0)):
+    """按 limit/offset 分页读取最近创建的真实会话。"""
+    paths = sorted((STATE / "sessions").glob("*.json"), reverse=True, key=lambda path: path.stat().st_mtime_ns)
+    return {"items": [read_json(path) for path in paths[offset:offset + limit]], "total": len(paths)}
+
+
+@app.get("/api/sessions/{session_id}")
+def get_session(session_id: str):
+    """读取 session_id 的状态和已经完整提交的轮次引用。"""
+    return sessions.read_session(session_id)
+
+
+@app.delete("/api/sessions/{session_id}")
+def close_session(session_id: str):
+    """结束 session_id；生成期间立即拒绝，取消请求须先等待清理完成。"""
+    with resource_lock():
+        return sessions.end_session(session_id)
+
+
+@app.post("/api/sessions/{session_id}/cancel")
+async def cancel_session(session_id: str):
+    """取消 session_id 当前生成并等待请求任务关闭上游连接。"""
+    sessions.read_session(session_id)
+    operation = app.state.qa_operations.get(session_id)
+    if operation is None:
+        raise HTTPException(409, "Session has no active generation")
+    operation.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await operation
+    return {"id": session_id, "cancelled": True}
+
+
 @app.post("/api/qa")
 async def qa(value: QueryInput, request: Request):
     """按 value 执行真实检索、提示词预算和流式问答，以 SSE 逐阶段发送并持久化。"""
@@ -732,11 +776,14 @@ async def qa(value: QueryInput, request: Request):
     lock = resource_lock()
     lock.__enter__()
     record = None
+    session = None
     try:
         from .runtime import capture_runtime
 
         snapshot = configs()
         validate_configs(snapshot)
+        if value.session_id:
+            session = sessions.check_session(value.session_id, value.workspace, value.tier, snapshot)
         from scripts.run_baseline import code_snapshot
 
         snapshot["source_sha256"] = code_snapshot()
@@ -748,6 +795,8 @@ async def qa(value: QueryInput, request: Request):
             "status": "running",
             "input": value.model_dump(),
             "snapshot": snapshot,
+            "session_id": value.session_id,
+            "turn": len(session["turns"]) + 1 if session else None,
         }
         path = STATE / "requests" / f"{request_id}.json"
         save_json(path, record)
@@ -781,12 +830,10 @@ async def qa(value: QueryInput, request: Request):
         async def run():
             """运行问答业务并保存完整真实结果；异常保存原始类型及消息。"""
             admitted = time.perf_counter()
+            committed = False
             try:
                 await emit("request", {"id": request_id})
                 await emit("stage", {"stage": "retrieval", "status": "running"})
-                found = await owned_thread(retrieve, value)
-                record["retrieval"] = found
-                await emit("retrieval", found)
                 start = time.perf_counter()
                 from transformers import AutoTokenizer
 
@@ -798,6 +845,23 @@ async def qa(value: QueryInput, request: Request):
                     config["llm"]["tokenizer"],
                     local_files_only=True,
                 )
+                budget = min(
+                    value.context_tokens,
+                    config["llm"]["max_model_len"] - config["llm"]["max_tokens"],
+                )
+                history, retained = sessions.history_messages(session, tokenizer, budget) if session else (None, [])
+                search_query = value.query or value.question
+                if history and not value.query:
+                    previous = [message["content"].removeprefix("Question: ")
+                                for message in history if message["role"] == "user"][-3:]
+                    search_query = "\n".join([*previous, value.question])
+                if len(search_query) > 20000:
+                    raise ValueError("Conversation retrieval query exceeds 20000 characters")
+                record["retrieval_query"] = search_query
+                found = await owned_thread(retrieve, value.model_copy(update={"query": search_query}))
+                record["retrieval"] = found
+                await emit("retrieval", found)
+                start = time.perf_counter()
                 seen = set()
                 candidates = []
                 for hit in found["hits"]:
@@ -805,12 +869,8 @@ async def qa(value: QueryInput, request: Request):
                     if doc_id not in seen:
                         candidates.append((doc_id, hit["text"]))
                         seen.add(doc_id)
-                budget = min(
-                    value.context_tokens,
-                    config["llm"]["max_model_len"] - config["llm"]["max_tokens"],
-                )
                 messages, included, evidence, ids, truncated = assemble_prompt(
-                    tokenizer, value.question or value.query, candidates, budget
+                    tokenizer, value.question or value.query, candidates, budget, history=history
                 )
                 prompt = {
                     "messages": messages,
@@ -827,6 +887,9 @@ async def qa(value: QueryInput, request: Request):
                     ),
                     "truncated": truncated,
                     "context_assembly_seconds": time.perf_counter() - start,
+                    "history_request_ids": retained,
+                    "input_sha256": hashlib.sha256(json.dumps(ids).encode()).hexdigest(),
+                    "omitted_history_turns": len(session["turns"]) - len(retained) if session else 0,
                 }
                 record["prompt"] = prompt
                 await emit("prompt", prompt)
@@ -838,6 +901,7 @@ async def qa(value: QueryInput, request: Request):
                     "seed": config["llm"]["seed"],
                     "stream": True,
                     "stream_options": {"include_usage": True},
+                    "request_id": request_id,
                 }
 
                 async def delta(text):
@@ -862,6 +926,8 @@ async def qa(value: QueryInput, request: Request):
                         admitted,
                         on_delta=delta,
                     )
+                if usage and usage["prompt_tokens"] != len(ids):
+                    raise ValueError("Engine input token count differs from the assembled prompt")
                 record.update(
                     status="ok" if usage else "usage_missing",
                     answer=answer,
@@ -874,15 +940,20 @@ async def qa(value: QueryInput, request: Request):
                     e2e_total_seconds=time.perf_counter() - admitted,
                     finished_at=time.time(),
                 )
+                record["citations"] = sessions.citations(answer, included)
                 save_json(path, record)
+                if session is not None:
+                    sessions.commit_turn(session, record)
+                committed = True
                 await emit("done", record)
             except asyncio.CancelledError:
-                record.update(
-                    status="interrupted",
-                    error="Client stream disconnected",
-                    finished_at=time.time(),
-                )
-                save_json(path, record)
+                if not committed:
+                    record.update(
+                        status="interrupted",
+                        error="Generation cancelled or client stream disconnected",
+                        finished_at=time.time(),
+                    )
+                    save_json(path, record)
                 raise
             except Exception as exc:
                 record.update(
@@ -895,12 +966,15 @@ async def qa(value: QueryInput, request: Request):
                 await emit("error", {"id": request_id, "detail": record["error"]})
             finally:
                 if asyncio.current_task().cancelling():
-                    with contextlib.suppress(asyncio.QueueFull):
-                        queue.put_nowait(None)
+                    if queue.full():
+                        queue.get_nowait()
+                    queue.put_nowait(None)
                 else:
                     await queue.put(None)
 
         operation = asyncio.create_task(run())
+        if value.session_id:
+            app.state.qa_operations[value.session_id] = operation
         try:
             while True:
                 event = await queue.get()
@@ -913,10 +987,14 @@ async def qa(value: QueryInput, request: Request):
                 operation.cancel()
             import anyio
 
-            with anyio.CancelScope(shield=True):
-                with contextlib.suppress(asyncio.CancelledError):
-                    await operation
-            lock.__exit__(None, None, None)
+            try:
+                with anyio.CancelScope(shield=True):
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await operation
+            finally:
+                if value.session_id:
+                    app.state.qa_operations.pop(value.session_id, None)
+                lock.__exit__(None, None, None)
 
     return StreamingResponse(
         events(),

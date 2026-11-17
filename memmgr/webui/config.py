@@ -36,6 +36,7 @@ class QueryInput(BaseModel):
     tier: str = Field(default="small", pattern="^(small|medium|full)$")
     top_k: int = Field(default=3, ge=1, le=100)
     context_tokens: int = Field(default=1024, ge=128, le=32768)
+    session_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
 
     @model_validator(mode="after")
     def require_text(self):
@@ -43,6 +44,14 @@ class QueryInput(BaseModel):
         if not (self.query or self.question or "").strip():
             raise ValueError("query or question must not be empty")
         return self
+
+
+class SessionInput(BaseModel):
+    """创建会话时由 workspace/tier 固定后续各轮的索引边界。"""
+
+    model_config = ConfigDict(extra="forbid")
+    workspace: str = Field(default="formal", pattern=r"^[a-zA-Z0-9_-]{1,48}$")
+    tier: str = Field(default="small", pattern="^(small|medium|full)$")
 
 
 def safe_name(value):

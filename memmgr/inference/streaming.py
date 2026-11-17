@@ -28,6 +28,7 @@ async def stream_completion(http, endpoint, payload, admitted_start, on_delta=No
     finish_reason = None
     usage = None
     content_chunks = 0
+    completed = False
     model_started = time.perf_counter()
     stream_started = model_started
 
@@ -38,8 +39,11 @@ async def stream_completion(http, endpoint, payload, admitted_start, on_delta=No
                 continue
             raw_event = line[6:]
             if raw_event == "[DONE]":
+                completed = True
                 break
             event = json.loads(raw_event)
+            if "error" in event:
+                raise RuntimeError(event["error"])
             usage = event.get("usage") or usage
             for choice in event.get("choices", []):
                 content = choice.get("delta", {}).get("content", "")
@@ -54,6 +58,8 @@ async def stream_completion(http, endpoint, payload, admitted_start, on_delta=No
                         await on_delta(content)
                 finish_reason = choice.get("finish_reason") or finish_reason
 
+    if not completed or finish_reason not in ("stop", "length"):
+        raise RuntimeError("Incomplete model stream or unsuccessful finish reason")
     model_total = time.perf_counter() - model_started
     return (
         answer,
