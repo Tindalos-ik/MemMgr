@@ -14,5 +14,21 @@
   "TRANSFORMERS_OFFLINE": "1",
   "prefix_caching": "vLLM default enabled (observed server log)",
   "chunked_prefill": "vLLM default enabled (observed server log)",
-  "concurrency_semantics": "Client concurrency2/4 includes queueing behind the fixed server max_num_seqs1; no claim of model parallel concurrency."
+  "concurrency_semantics": "Client concurrency2/4 includes queueing behind the fixed server max_num_seqs1; no claim of model parallel concurrency.",
+  "kv_cache": {
+    "tier": "gpu",
+    "policy": "lru",
+    "batch_invariant": false,
+    "block_tokens": 64,
+    "gpu_bytes": 0,
+    "cpu_bytes": 67108864,
+    "ssd_root": ".agent/kv-cache",
+    "ssd_bytes": 4294967296,
+    "model_dir": "",
+    "restore": "always",
+    "cost_profile": "",
+    "placement_profile": "",
+    "margin_ms": 0.5,
+    "audit_path": ".agent/kv-events.jsonl"
+  }
 }

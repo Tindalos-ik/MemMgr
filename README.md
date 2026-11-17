@@ -102,7 +102,11 @@ vLLM 在当前终端运行。保留该终端，再开一个终端，从项目根
 | [实验设计](docs/design.md) | 实验矩阵、变量与指标定义、计时边界、统计方法和复现步骤 |
 | [实测报告](reports/Tindalos-ik_test_report.md) | 数据配置、性能结果、功能验收和问答示例 |
 | [配置](config/) | 模型、检索和正式实验参数 |
-| [应用](memmgr/) | `long_term/` 长期记忆、`short_term/` 短期策略命名空间、`inference/` 推理、`benchmarks/` 实验与 `webui/` 后端 |
+| [应用](memmgr/) | `long_term/` 长期记忆、`short_term/` 分层 KV 与复用、放置策略、`inference/` 推理、`benchmarks/` 实验与 `webui/` 后端 |
+| [分层 KV](docs/kv-cache.md) | CPU / SSD 缓存、复用预测、成本校准与联合放置配置 |
+| [多轮问答](docs/sessions.md) | 会话创建、继续、取消、预算与逐轮证据来源 |
+| [三级放置实验](experiment_raa/06_kv_placement/README.md) | 同容量 LRU、复用预测与联合放置的真实对照 |
+| [多轮 RAG 实验](experiment_raa/07_session_rag/README.md) | 双会话、证据变化与三级 KV 策略对照 |
 | [脚本](scripts/) | 服务管理、实验执行和结果复算 |
 | [测试](tests/) | 文本分块、隔离与提示词预算测试 |
 

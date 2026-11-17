@@ -38,6 +38,8 @@ export function Overview({ navigate }: { navigate: (page: string) => void }) {
   );
   const tasks = useApi("/tasks", 4000);
   const runs = useApi("/runs", 5000);
+  const kv = useApi("/kv", 5000);
+  const kvData = kv.data;
   /** 请求启动指定服务；name 为后端允许的 vllm 或 chroma 名称。 */
   async function startService(name: "vllm" | "chroma") {
     setStartLoading((current) => ({ ...current, [name]: true }));
@@ -329,6 +331,59 @@ export function Overview({ navigate }: { navigate: (page: string) => void }) {
           </>
         ) : (
           !resources.loading && <Empty>此时间范围暂无采样。</Empty>
+        )}
+      </Card>
+      <Card title="KV 缓存" actions={<Refresh onClick={kv.refresh} />}>
+        <State state={kv} />
+        {kvData && (
+          <>
+            <p className="muted">
+              {kvData.configured.tier} · {kvData.configured.policy} ·
+              传输数值为引擎累计载荷
+            </p>
+            <table>
+              <tbody>
+                {[
+                  ["GPU 命中 token", "vllm:prefix_cache_hits_total"],
+                  ["外部恢复 token", "vllm:external_prefix_cache_hits_total"],
+                  [
+                    "Prefill 计算 token",
+                    "vllm:request_prefill_kv_computed_tokens_sum",
+                  ],
+                  ["GPU → CPU 字节", "vllm:kv_offload_store_bytes_total"],
+                  ["CPU → GPU 字节", "vllm:kv_offload_load_bytes_total"],
+                  [
+                    "CPU → SSD 字节",
+                    "vllm:kv_offload_tiering_write_bytes_total",
+                  ],
+                  [
+                    "SSD → CPU 字节",
+                    "vllm:kv_offload_tiering_read_bytes_total",
+                  ],
+                ].map(([label, name]) => {
+                  const samples = kvData.metrics.filter(
+                    (row: RecordData) => row.name === name,
+                  );
+                  return (
+                    <tr key={name}>
+                      <th>{label}</th>
+                      <td>
+                        {samples.length
+                          ? format(
+                              samples.reduce(
+                                (total: number, row: RecordData) =>
+                                  total + row.value,
+                                0,
+                              ),
+                            )
+                          : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </>
         )}
       </Card>
       <Card title="近期实验" actions={<Refresh onClick={tasks.refresh} />}>

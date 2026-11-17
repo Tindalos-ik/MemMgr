@@ -14,6 +14,24 @@ const descriptions: Record<string, string> = {
   context_tokens: "输入 token 预算，含模板、问题与证据",
   concurrency: "1–4",
   gpu_memory_utilization: "0.1–0.95",
+  tier: "GPU、GPU＋CPU 或 GPU＋CPU＋SSD",
+  policy: "LRU、复用准入、预测淘汰或复用与成本联合放置",
+  batch_invariant: "CPU、SSD 策略须开启固定数值路径",
+  gpu_bytes: "GPU KV 字节预算；0 使用引擎自动分配",
+  cpu_bytes: "CPU KV 字节预算，含 SSD 中转空间",
+  ssd_bytes: "SSD KV 字节上限，容量不足时淘汰空闲块",
+  ssd_root: "项目 .agent 内的独占 SSD 目录，须支持 O_DIRECT",
+  model_dir: "项目 .agent 内自己训练的可信 GBDT 目录",
+  cost_profile: "CPU 回迁门槛的校准成本表",
+  placement_profile: "联合放置的校准成本表，位于项目 .agent 内",
+  restore: "始终回迁、重算或 CPU 成本门槛；SSD 使用 always",
+  margin_ms: "策略要求的最小预计节省，单位 ms",
+  audit_path: "项目 .agent 内的真实 KV 事件 JSONL",
+};
+const kvChoices: Record<string, string[]> = {
+  tier: ["gpu", "cpu", "ssd"],
+  policy: ["lru", "admission", "learned", "placement"],
+  restore: ["always", "never", "gate"],
 };
 /** 递归字段；value 为对象，change 更新对象，prefix 为完整路径，readonly 为服务器禁止修改的路径。 */
 function Fields({
@@ -51,7 +69,18 @@ function Fields({
             <span>
               {key} {disabled && <span className="badge">只读</span>}
             </span>
-            {typeof entry === "boolean" ? (
+            {prefix === "server.kv_cache" && kvChoices[key] ? (
+              <select
+                disabled={disabled}
+                aria-label={path}
+                value={String(entry)}
+                onChange={(e) => change({ ...value, [key]: e.target.value })}
+              >
+                {kvChoices[key].map((option) => (
+                  <option key={option}>{option}</option>
+                ))}
+              </select>
+            ) : typeof entry === "boolean" ? (
               <select
                 disabled={disabled}
                 aria-label={path}
@@ -83,7 +112,12 @@ function Fields({
                       ? 4
                       : undefined
                 }
-                required
+                required={
+                  prefix !== "server.kv_cache" ||
+                  !["model_dir", "cost_profile", "placement_profile"].includes(
+                    key,
+                  )
+                }
                 value={
                   Array.isArray(entry)
                     ? JSON.stringify(entry)
