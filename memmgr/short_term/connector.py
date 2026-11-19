@@ -16,12 +16,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import OffloadingConnector
 from vllm.v1.kv_cache_interface import FullAttentionSpec
-from vllm.v1.kv_offload.base import OffloadPolicy, RequestOffloadingContext, make_offload_key
+from vllm.v1.kv_offload.base import (
+    LookupResult, OffloadPolicy, OffloadingCounterMetadata, RequestOffloadingContext, make_offload_key,
+)
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
+from vllm.v1.kv_offload.tiering.fs.io import batch_store_block
 from vllm.v1.kv_offload.tiering.fs.manager import FileSystemTierManager
-from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
+from vllm.v1.kv_offload.tiering.manager import JobMetadata, TieringOffloadingManager
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 from .cost import CostPolicy
@@ -225,92 +229,210 @@ class ManagedCPUSpec(CPUOffloadingSpec):
         return self._manager
 
 
+class _SSDCachePolicy(ManagedLRU):
+    """沿用 CPU 策略的牺牲块选择，在槽进入原生空闲列表前通知 SSD 管理器。"""
+
+    def evict(self, n, protected):
+        """按 CPU 策略淘汰 n 个非 protected 块，并交接原槽给 SSD。"""
+        victims = super().evict(n, protected)
+        if victims is None:
+            req_context, reason = self.tiering.allocation
+            if self.tiering._wait_for_eager_slots(req_context, reason):
+                victims = super().evict(n, protected)
+        if victims:
+            self.tiering.before_reuse(victims)
+        return victims
+
+
 class ManagedFileSystemTier(FileSystemTierManager):
-    """使用原生 O_DIRECT 文件传输，失败时立即报错。"""
+    """同一独占目录内，只发布成功写完的 O_DIRECT 文件。"""
 
     def __init__(self, offloading_spec, primary_kv_view, tier_type, **options):
-        """用 offloading_spec、primary_kv_view、tier_type 和 options 初始化文件层。"""
-        self.lease = None
-        self.jobs = {}
-        self.control = None
-        Path(options["root_dir"]).mkdir(parents=True, exist_ok=True, mode=0o700)
-        super().__init__(offloading_spec, primary_kv_view, tier_type, **options)
-        if not self._use_o_direct:
-            self.shutdown()
-            raise RuntimeError("SSD tier requires a filesystem supporting O_DIRECT")
+        """用 offloading_spec 的配额与 primary_kv_view 初始化 tier_type 文件层；options 指定目录和线程。"""
+        root = Path(options["root_dir"])
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.limit = offloading_spec.extra_config["policy_config"]["ssd_bytes"]
-        self.paths = {str(path) for path in Path(options["root_dir"]).rglob("*.bin")}
-        self.allocated = sum(Path(path).stat().st_size for path in self.paths)
-        if self.allocated > self.limit:
-            self.shutdown()
-            raise ValueError("Existing SSD cache exceeds configured capacity")
-        self.lease = (Path(options["root_dir"]) / ".memmgr.lock").open("a")
+        self.jobs, self.pending = {}, set()
+        self.failed = False
+        self.lease = (root / ".memmgr.lock").open("a")
         try:
             fcntl.flock(self.lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            self.shutdown()
+            paths = list(root.rglob("*.bin"))
+            self.paths = {str(path) for path in paths}
+            self.allocated = sum(path.stat().st_size for path in paths)
+            if self.allocated > self.limit:
+                raise ValueError("Existing SSD cache exceeds configured capacity")
+            super().__init__(offloading_spec, primary_kv_view, tier_type, **options)
+            if not self._use_o_direct:
+                super().shutdown()
+                raise RuntimeError("SSD tier requires a filesystem supporting O_DIRECT")
+        except BaseException:
+            self.lease.close()
             raise
 
-    def bind(self, control):
-        """为文件层绑定 control，记录实际 I/O 布局与容量。"""
+    def bind(self, control, write_mode):
+        """为文件层绑定 control，并记录 write_mode 及实际容量。"""
         self.control = control
         control.emit("fs_init", direct_io=True, block_bytes=self._block_size,
-                     capacity=self.limit, existing_bytes=self.allocated)
+                     capacity=self.limit, existing_bytes=self.allocated, ssd_write=write_mode)
+
+    def needs_write(self, key):
+        """仅对尚未成功写入且不在途的 key 发起写入。"""
+        path = self.file_mapper.get_file_name(key)
+        return path not in self.paths and path not in self.pending
+
+    def lookup(self, key, req_context):
+        """为 req_context 查询 key；作业成功前不允许用未发布的文件提升。"""
+        path = self.file_mapper.get_file_name(key)
+        if path in self.pending:
+            return LookupResult.RETRY
+        return LookupResult.HIT if path in self.paths else LookupResult.MISS
+
+    def check_capacity(self, blocks):
+        """检查 blocks 个新文件能否在现有 SSD 配额内预约。"""
+        if self.allocated + blocks * self._block_size > self.limit:
+            self.failed = True
+            raise RuntimeError("SSD KV capacity exhausted")
+
+    def _audit_job(self, kind, job, reason, **fields):
+        """记录 kind 的 job、原生块槽和触发 reason，fields 补充完成结果。"""
+        self.control.emit(kind, direction="load" if job.is_promotion else "store", job=job.job_id,
+                          request_id=job.req_context.req_id, keys=[key.hex() for key in job.keys],
+                          slots=[int(slot) for slot in job.block_ids], reason=reason, **fields)
+
+    def _begin_job(self, job, reason):
+        """为 job 登记 reason 和源文件写入配额；重复或超额提交立即失败。"""
+        paths = [] if job.is_promotion else [self.file_mapper.get_file_name(key) for key in job.keys]
+        if paths:
+            if len(set(paths)) != len(paths) or any(path in self.paths or path in self.pending for path in paths):
+                raise RuntimeError("Duplicate SSD KV store")
+            self.check_capacity(len(paths))
+            self.allocated += len(paths) * self._block_size
+            self.pending.update(paths)
+        self.jobs[job.job_id] = (job, reason, paths)
+        self._audit_job("fs_submit", job, reason)
+        return paths
+
+    def _finish_job(self, result):
+        """发布 result 中确认完成的文件并记录结果；失败文件不进入查找索引。"""
+        job, reason, paths = self.jobs.pop(result.job_id)
+        self.pending.difference_update(paths)
+        if result.success:
+            self.paths.update(paths)
+        else:
+            self.failed = True
+        self._audit_job("fs_complete", job, reason, success=result.success,
+                        transfer_seconds=result.transfer_time)
 
     def submit_store(self, job_metadata):
-        """为 job_metadata 的新文件预留 SSD 配额，容量不足时立即终止。"""
-        paths = {str(self.file_mapper.get_file_name(key)) for key in job_metadata.keys}
-        new_paths = paths - self.paths
-        requested = len(new_paths) * self._block_size
-        if self.allocated + requested > self.limit:
-            raise RuntimeError("SSD KV capacity exhausted")
-        self.paths.update(new_paths)
-        self.allocated += requested
-        self.jobs[job_metadata.job_id] = job_metadata
-        self.control.emit("fs_submit", direction="store", job=job_metadata.job_id,
-                          request_id=job_metadata.req_context.req_id,
-                          keys=[key.hex() for key in job_metadata.keys])
+        """异步写入 job_metadata，由原生 CPU 引用计数保护源槽。"""
+        self._begin_job(job_metadata, "eager")
         super().submit_store(job_metadata)
 
+    def store_before_reuse(self, job, reason):
+        """从尚未归还的 CPU 槽写入 job；reason 指明 GPU 写或 SSD 提升。"""
+        paths = self._begin_job(job, reason)
+        started = time.perf_counter()
+        try:
+            batch_store_block(paths, self._primary_kv_view,
+                              [slot * self._block_size for slot in job.block_ids],
+                              self._block_size, self._use_o_direct)
+        except Exception:
+            self._finish_job(JobResult(job.job_id, False, transfer_time=time.perf_counter() - started))
+            raise
+        result = JobResult(job.job_id, True, transfer_time=time.perf_counter() - started)
+        self._finish_job(result)
+        return result
+
     def submit_load(self, job_metadata):
-        """提交 job_metadata 的原生 SSD 到 CPU 读取并记录块身份。"""
-        self.jobs[job_metadata.job_id] = job_metadata
-        self.control.emit("fs_submit", direction="load", job=job_metadata.job_id,
-                          request_id=job_metadata.req_context.req_id,
-                          keys=[key.hex() for key in job_metadata.keys])
+        """提交 job_metadata 的原生 SSD 到 CPU 读取并记录目标槽。"""
+        self._begin_job(job_metadata, "promotion")
         super().submit_load(job_metadata)
 
     def get_finished_jobs(self):
-        """返回完成的真实传输，任一失败立即报错。"""
-        result = list(super().get_finished_jobs())
-        for completed in result:
-            job = self.jobs.pop(completed.job_id)
-            self.control.emit("fs_complete", direction="load" if job.is_promotion else "store",
-                              job=completed.job_id, success=completed.success,
-                              request_id=job.req_context.req_id, keys=[key.hex() for key in job.keys],
-                              transfer_seconds=completed.transfer_time)
-            if not completed.success:
-                raise RuntimeError("SSD KV transfer failed")
-        return result
+        """交付真实结果；管理器结算引用与预约后再传播失败。"""
+        results = list(super().get_finished_jobs())
+        for result in results:
+            self._finish_job(result)
+        return results
 
     def shutdown(self):
-        """停止真实文件传输并释放当前缓存目录的独占锁。"""
+        """结束文件传输线程后释放目录的独占锁。"""
         try:
             super().shutdown()
         finally:
-            if self.lease is not None:
-                self.lease.close()
+            self.lease.close()
 
 
 class ManagedTieringManager(TieringOffloadingManager):
-    """保留原生 SSD 提升，使用同一控制器筛选 GPU 写入并保护缓存块。"""
+    """保留 CPU 决策与 SSD 提升；以原生引用或同步槽交接保护写盘。"""
+
+    SLOT_WAIT = "vllm:kv_offload_ssd_slot_wait_seconds"
 
     def __init__(self, native, extra):
-        """接管 native 尚未使用的原生资源；extra 提供策略配置。"""
+        """接管 native 的原生资源；extra 提供固定的 CPU 策略与 SSD 写入模式。"""
         super().__init__(native.primary_tier, native.secondary_tiers)
+        if len(self.secondary_tiers) != 1 or not isinstance(self.secondary_tiers[0], ManagedFileSystemTier):
+            raise ValueError("Managed SSD requires exactly one managed filesystem tier")
+        self.ssd = self.secondary_tiers[0]
         self.control = PolicyController(self.primary_tier, extra)
-        for tier in self.secondary_tiers:
-            tier.bind(self.control)
+        self.write_mode = self.control.options.get("ssd_write", "eager")
+        self.ssd.bind(self.control, self.write_mode)
+        self.primary_tier._policy.tiering = self
+        self.allocation = None
+        self.evicted = ()
+        self.slot_wait = 0.0
+
+    def before_reuse(self, victims):
+        """在原生分配器收到 victims 的槽之前，写完尚未入盘的块。"""
+        req_context, reason = self.allocation
+        self.evicted = victims
+        if self.write_mode != "on_evict":
+            return
+        keys, slots = [], []
+        for key, block in victims:
+            if block.ref_cnt != 0:
+                raise RuntimeError("CPU eviction selected an in-flight KV block")
+            if self.ssd.needs_write(key):
+                keys.append(key)
+                slots.append(block.block_id)
+        if not keys:
+            return
+        started = time.perf_counter()
+        job = TransferJob(self._next_job_id(), keys, slots, False, req_context)
+        metadata = JobMetadata(job, 0)
+        self._metrics.on_job_registered(metadata)
+        try:
+            result = self.ssd.store_before_reuse(job, reason)
+        except Exception:
+            self._metrics.on_job_finished(metadata, JobResult(job.job_id, False))
+            raise
+        self._metrics.on_job_finished(metadata, result)
+        self._record_wait(req_context, reason, len(slots), started)
+
+    def _record_wait(self, req_context, reason, slots, started):
+        """记录 req_context 此次 reason 从 started 起为保护 slots 个源槽付出的墙钟时间。"""
+        seconds = time.perf_counter() - started
+        self.slot_wait += seconds
+        self.control.emit("ssd_slot_wait", request_id=req_context.req_id, reason=reason,
+                          slots=slots, seconds=seconds)
+
+    def _wait_for_eager_slots(self, req_context, reason):
+        """当 req_context 的 reason 无法分配时，等待在途提前写并释放对应 CPU 引用。"""
+        slots = len(self.ssd.pending)
+        if not slots:
+            return False
+        started = time.perf_counter()
+        self.ssd.drain_jobs()
+        self._process_finished_jobs()
+        self._record_wait(req_context, reason, slots, started)
+        return True
+
+    def _process_finished_jobs(self):
+        """释放所有已完成作业的 CPU 引用或预约，再传播盘层失败。"""
+        super()._process_finished_jobs()
+        if self.ssd.failed:
+            raise RuntimeError("SSD KV transfer failed")
 
     def on_new_request(self, req_context, **options):
         """登记 req_context 和 options，使完整 prompt 都有写入机会。"""
@@ -318,23 +440,41 @@ class ManagedTieringManager(TieringOffloadingManager):
         return RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
 
     def prepare_store(self, keys, req_context):
-        """按 req_context 的冻结准入筛选 keys，交给原生三级管理器。"""
-        selected = self.control.select(keys, req_context)
-        result = super().prepare_store(selected, req_context)
-        self.control.protected = set()
+        """按 req_context 的 CPU 准入分配 keys，并审计实际的 CPU 槽。"""
+        self._maybe_process_finished_jobs()
+        self.allocation = (req_context, "gpu_store")
+        try:
+            selected = self.control.select(keys, req_context)
+            result = super().prepare_store(selected, req_context)
+            if result is None and self._wait_for_eager_slots(*self.allocation):
+                result = super().prepare_store(selected, req_context)
+        finally:
+            self.allocation = None
+            self.evicted = ()
+            self.control.protected = set()
         if result is None:
             raise RuntimeError("CPU KV allocation failed")
         self.control.emit("store", request_id=req_context.req_id,
                           keys=[key.hex() for key in result.keys_to_store],
+                          slots=[int(slot) for slot in result.store_spec.block_ids],
                           evicted=[key.hex() for key in result.evicted_keys])
         return result
 
     def complete_store(self, keys, req_context, success=True):
-        """确认 req_context 的 keys 完成 GPU 到 CPU 写入，失败立即报错。"""
+        """确认 req_context 的 keys 已写进 CPU；仅 eager 在此提交未写过的块。"""
         if not success:
             raise RuntimeError("GPU to CPU transfer failed")
-        super().complete_store(keys, req_context, success)
+        self.primary_tier.complete_store(keys, req_context)
         self.control.emit("stored", request_id=req_context.req_id, keys=[key.hex() for key in keys])
+        if self.write_mode == "eager":
+            missing = [key for key in keys if self.ssd.needs_write(key)]
+            if missing:
+                self.ssd.check_capacity(len(missing))
+                self.ssd.submit_store(self.create_store_job(missing, req_context))
+        state = self._req_state[req_context.req_id]
+        assert state.pending_primary_stores > 0
+        state.pending_primary_stores -= 1
+        self._maybe_finalize_request(req_context.req_id)
 
     def complete_load(self, keys, req_context):
         """确认 req_context 的 keys 完成原生 CPU 到 GPU 回迁。"""
@@ -348,19 +488,41 @@ class ManagedTieringManager(TieringOffloadingManager):
             self.control.emit("ssd_request_closed", request_id=req_id)
 
     def _initiate_promotion(self, tier_idx, key, req_context):
-        """从 tier_idx 为 req_context 提升 key，记录实际 CPU 淘汰。"""
-        before = set(self.primary_tier._policy.blocks)
-        result = super()._initiate_promotion(tier_idx, key, req_context)
-        self.control.emit("promotion", request_id=req_context.req_id, key=key.hex(), accepted=result,
-                          evicted=[item.hex() for item in before - self.primary_tier._policy.blocks.keys()])
-        if not result:
-            raise RuntimeError("CPU allocation failed during SSD promotion")
-        return result
+        """从 tier_idx 为 req_context 提升 key，确保写完牺牲块才预约目标槽。"""
+        self.allocation = (req_context, "promotion")
+        try:
+            if not self.primary_tier._get_num_free_blocks() and not self.primary_tier._num_evictable_cache_blocks:
+                self._wait_for_eager_slots(*self.allocation)
+            if not super()._initiate_promotion(tier_idx, key, req_context):
+                raise RuntimeError("CPU allocation failed during SSD promotion")
+            pending = self._pending_load_submissions[tier_idx][req_context.req_id]
+            self.control.emit("promotion", request_id=req_context.req_id, key=key.hex(), accepted=True,
+                              slot=int(pending.block_ids[-1]),
+                              evicted=[victim.hex() for victim, _ in self.evicted])
+            return True
+        finally:
+            self.allocation = None
+            self.evicted = ()
+
+    def get_stats(self):
+        """在原生指标中累加实际的 CPU 槽分配等待时间。"""
+        stats = super().get_stats()
+        stats.increase_counter(self.SLOT_WAIT, self.slot_wait)
+        self.slot_wait = 0.0
+        return stats
 
     def shutdown(self):
-        """排空原生三级传输，释放资源并关闭本次审计文件。"""
+        """先提交并排空盘层作业，处理结果后释放 mmap、目录锁和审计文件。"""
         try:
-            super().shutdown()
+            try:
+                self._flush_pending_promotions()
+                self.ssd.drain_jobs()
+                self._process_finished_jobs()
+                self._metrics.assert_idle()
+                assert not (self._jobs or self.ssd.jobs or self.ssd.pending)
+                self.control.emit("ssd_shutdown", success=True)
+            finally:
+                super().shutdown()
         finally:
             self.control.handler.close()
 
@@ -369,15 +531,33 @@ class ManagedTieringSpec(TieringOffloadingSpec):
     """复用原生三级资源创建流程，配置固定的缓存策略类。"""
 
     def __init__(self, config):
-        """从 config 创建三级 spec，并指定可绑定控制器的 ManagedLRU。"""
+        """从 config 创建只在 SSD 层接管原生槽交接的三级 spec。"""
         super().__init__(config)
-        self.eviction_policy = "ManagedLRU"
+        self.eviction_policy = "_SSDCachePolicy"
         self.cache_policy_module_path = __name__
+        options = self.extra_config["policy_config"]
+        if options.get("ssd_write", "eager") not in ("eager", "on_evict") or options["restore"] != "always":
+            raise ValueError("Invalid managed SSD write or restore policy")
+
+    @classmethod
+    def build_metric_definitions(cls, extra_config):
+        """扩充 extra_config 的原生指标定义，公开源槽等待累计秒数。"""
+        metrics = super().build_metric_definitions(extra_config)
+        metrics[ManagedTieringManager.SLOT_WAIT] = OffloadingCounterMetadata(
+            documentation="Scheduler wall time waiting to safely reuse CPU KV slots for SSD offload, in seconds."
+        )
+        return metrics
 
     def get_manager(self):
         """创建原生共享内存与文件层后交由 ManagedTieringManager 管理。"""
         if self._manager is None:
-            self._manager = ManagedTieringManager(super().get_manager(), self.extra_config)
+            native = super().get_manager()
+            try:
+                self._manager = ManagedTieringManager(native, self.extra_config)
+            except BaseException:
+                self._manager = None
+                native.shutdown()
+                raise
         return self._manager
 
 
