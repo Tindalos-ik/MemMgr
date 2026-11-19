@@ -30,6 +30,7 @@ from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 from .cost import CostPolicy
 from .prefix_fit import fit_prefix
+from .retention import RetentionProfile, best_prefix, filesystem_device, retention_context
 from .reuse import History, Predictor
 
 
@@ -42,17 +43,24 @@ class StrictAuditHandler(RotatingFileHandler):
 
 
 class ManagedLRU(LRUCachePolicy):
-    """保留原生块状态和引用保护，为 learned 模式提供叶块优先淘汰。"""
+    """保留原生引用保护，为学习策略提供连续前缀的叶块优先淘汰。"""
 
     def __init__(self, cache_capacity):
         """初始化 cache_capacity 个块，controller 在管理器创建时绑定。"""
         super().__init__(cache_capacity)
         self.controller = None
 
-    def plan(self, n, protected):
-        """为 n 个空位选择低复用叶块，跳过 protected 与在途块，保持父块连续性。"""
+    def plan(self, n, protected, *, partial=False):
+        """为 n 个空位选择最低价值的叶块；protected 不可动，partial 允许返回较短的计划。"""
+        if not n:
+            return []
         controller = self.controller
-        controller.refresh_scores(self.blocks)
+        if controller.retention is None:
+            controller.refresh_scores(self.blocks)
+            scores = controller.scores
+        else:
+            scores = {key: value for key, (_, _, value) in
+                      controller.retention_values(self.evictable_blocks.keys() - protected).items()}
         remaining = set(self.blocks)
         chosen = []
         ranks = {key: rank for rank, key in enumerate(self.evictable_blocks)}
@@ -61,8 +69,8 @@ class ManagedLRU(LRUCachePolicy):
             candidates = [key for key in self.evictable_blocks
                           if key in remaining and key not in protected and key not in parents]
             if not candidates:
-                return None
-            key = min(candidates, key=lambda key: (controller.scores[key], ranks[key]))
+                return chosen if partial else None
+            key = min(candidates, key=lambda key: (scores[key], ranks[key]))
             if self.blocks[key].ref_cnt != 0:
                 raise RuntimeError("Pinned block entered eviction candidates")
             chosen.append((key, self.blocks[key]))
@@ -71,7 +79,7 @@ class ManagedLRU(LRUCachePolicy):
 
     def evict(self, n, protected):
         """原子淘汰 n 个块；protected 保留调用者正在使用的块。"""
-        if self.controller.options["policy"] != "learned":
+        if self.controller.options["policy"] not in {"learned", "time_value"}:
             return super().evict(n, protected | self.controller.protected)
         candidates = self.plan(n, protected | self.controller.protected)
         if candidates is not None:
@@ -94,6 +102,7 @@ class PolicyController:
         self.history = History()
         self.parents, self.active, self.scores = {}, {}, {}
         self.protected = set()
+        self.retention = self.retention_tier = None
         self.session = uuid.uuid4().hex
         self.path = Path(self.options["audit_path"])
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,12 +125,94 @@ class PolicyController:
             missing = [key for key in keys if key not in self.scores]
             self.scores.update(zip(missing, self.predictor.score([self.history.features(key) for key in missing])))
 
-    def begin(self, request):
-        """在 request 查找前观察所有完整前缀块，每个请求只更新一次时钟。"""
-        started = time.perf_counter()
-        keys = [make_offload_key(value, 0) for value in request.block_hashes]
-        if len(keys) != request.num_prompt_tokens // 64:
-            raise ValueError("Unexpected complete prompt hash count")
+    def bind_retention(self, context, tiers):
+        """核对 profile 和实际 context；tiers 提供只读的下层文件索引。"""
+        if self.options["policy"] != "time_value":
+            return
+        tier = self.options["tier"]
+        device = None
+        if tier == "ssd":
+            self.retention_tier, = tiers
+            device = dict(mount=filesystem_device(self.options["ssd_root"]),
+                          capacity=self.options["ssd_bytes"], write=self.options["ssd_write"])
+        self.retention = RetentionProfile(self.options["retention_profile"], retention_context(context, tier, device))
+        span = (context["max_model_len"] - 1) // self.identity["block_tokens"]
+        required = span if tier == "ssd" else min(span, context["cpu_blocks"])
+        if self.retention.max_depth < required:
+            raise ValueError(f"Retention profile does not cover the configured {required}-block span")
+        self.emit("retention_profile", sha256=self.retention.sha256, max_depth=self.retention.max_depth)
+
+    def retention_values(self, keys):
+        """估计 keys 的连续复用概率、当前非 CPU 替代路径及其加权时间差。"""
+        blocks = self.primary._policy.blocks
+        tier = self.retention_tier
+        ancestors = set(keys)
+        for key in keys:
+            parent = self.parents[key]
+            while parent in self.history.entries and parent not in ancestors:
+                ancestors.add(parent)
+                parent = self.parents[parent]
+        self.refresh_scores(ancestors)
+        probabilities, copies, reach = {}, {}, {None: True}
+
+        def probability(key):
+            """给定 key 及其祖先的冻结分数，保证复用概率随前缀加长不升高。"""
+            if key not in probabilities:
+                parent = self.parents[key]
+                upper = 1.0 if parent is None else probability(parent) if parent in ancestors else 0.0
+                probabilities[key] = min(self.scores[key], upper)
+            return probabilities[key]
+
+        def copied(key):
+            """查询 key 是否已被文件层发布为可恢复副本；不触发提升。"""
+            if key not in copies:
+                copies[key] = tier.lookup(key, None) is LookupResult.HIT
+            return copies[key]
+
+        def reachable(key):
+            """检查沿 key 到根的 CPU 或 SSD 路径是否连续可读。"""
+            if key not in reach:
+                cpu = blocks.get(key)
+                reach[key] = (key in self.parents and (bool(cpu and cpu.is_ready) or copied(key))
+                              and reachable(self.parents[key]))
+            return reach[key]
+
+        values = {}
+        for key in keys:
+            lower = bool(tier and copied(key) and reachable(self.parents[key]))
+            p = probability(key)
+            depth = self.history.entries[key][4] // self.identity["block_tokens"]
+            values[key] = (p, "ssd" if lower else "recompute", p * self.retention.gain(depth, lower))
+        return values
+
+    def time_value_select(self, selected, request_id):
+        """在容量允许的 selected 中选正净收益最高的前缀，为 request_id 记录计价。"""
+        profile = self.retention
+        blocks = self.primary._policy.blocks
+        missing = [key for key in selected if key not in blocks]
+        if not missing:
+            return selected
+        free = self.primary._get_num_free_blocks()
+        victims = [key for key, _ in self.primary._policy.plan(max(0, len(missing) - free), self.protected,
+                                                              partial=True)]
+        incoming = self.retention_values(missing)
+        outgoing = self.retention_values(victims)
+        tier = self.retention_tier
+        writes = {key: profile.cpu_write + (profile.ssd_write if tier and tier.needs_write(key) else 0.0)
+                  for key in missing}
+        count, benefit, written, displaced = best_prefix([(incoming[key][2], writes[key]) for key in missing],
+                                                         [outgoing[key][2] for key in victims], free)
+        stop = selected.index(missing[count]) if count < len(missing) else len(selected)
+        self.emit("retain_value", request_id=request_id, proposed=len(missing), written=count,
+                  free=free, benefit_seconds=benefit, write_seconds=written,
+                  displaced_seconds=displaced, net_seconds=benefit - written - displaced,
+                  incoming=[(key.hex(), *incoming[key], writes[key]) for key in missing],
+                  victims=[(key.hex(), *outgoing[key]) for key in victims],
+                  planned_evictions=max(0, count - free))
+        return selected[:stop]
+
+    def observe(self, request_id, keys):
+        """为 request_id 观察已排序的 keys 并保存冻结准入；可复用真实审计的键链。"""
         protected = set(self.primary._policy.blocks)
         protected.update(key for state in self.active.values() for key in state["keys"])
         self.history.observe(keys, 64, protected)
@@ -129,13 +220,26 @@ class PolicyController:
             self.parents[key] = keys[index - 1] if index else None
         self.parents = {key: parent for key, parent in self.parents.items() if key in self.history.entries}
         self.scores = {}
-        self.refresh_scores(list(dict.fromkeys([*keys, *self.primary._policy.blocks])))
+        self.refresh_scores(dict.fromkeys([*keys, *self.primary._policy.blocks]))
         admitted = []
         for key in keys:
             if self.predictor and self.scores[key] < self.predictor.threshold:
                 break
             admitted.append(key)
-        self.active[request.request_id] = dict(keys=keys, admitted=admitted)
+        self.active[request_id] = dict(keys=keys, admitted=admitted)
+        return admitted
+
+    def begin(self, request):
+        """在 request 查找前观察所有完整前缀块，每个请求只更新一次时钟。"""
+        started = time.perf_counter()
+        keys = [make_offload_key(value, 0) for value in request.block_hashes]
+        if len(keys) != request.num_prompt_tokens // 64:
+            raise ValueError("Unexpected complete prompt hash count")
+        if self.retention is not None and keys:
+            fingerprint = hashlib.sha256(json.dumps(request.prompt_token_ids[:64]).encode()).hexdigest()
+            if fingerprint in self.retention.calibration_prefixes:
+                raise ValueError("Retention workload shares a first block with calibration")
+        admitted = self.observe(request.request_id, keys)
         self.emit("begin", request_id=request.request_id, clock=self.history.clock,
                   prompt_tokens=request.num_prompt_tokens, keys=[key.hex() for key in keys],
                   features=[self.history.features(key) for key in keys],
@@ -171,6 +275,8 @@ class PolicyController:
                           displaced=displaced, required=required,
                           victims=[key.hex() for key, _ in victims], accepted=bool(selected))
             state["selected"] = set(selected)
+        if self.retention is not None:
+            selected = self.time_value_select(selected, req_context.req_id)
         return [key for key in selected if key in offered]
 
 
@@ -598,6 +704,7 @@ class ManagedConnector(OffloadingConnector):
                                 source={path.name: hashlib.sha256(path.read_bytes()).hexdigest()
                                         for path in Path(__file__).parent.glob("*.py")})
             self.control.emit("context", context=self.context)
+            self.control.bind_retention(self.context, getattr(self.connector_scheduler.manager, "secondary_tiers", ()))
             if self.connector_scheduler.config.supports_partial_tail:
                 raise ValueError("Partial-tail KV state has not been validated")
             options = self.control.options

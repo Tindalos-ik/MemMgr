@@ -11,7 +11,7 @@ class KVConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
     tier: Literal["gpu", "cpu", "ssd"] = "gpu"
-    policy: Literal["lru", "admission", "learned"] = "lru"
+    policy: Literal["lru", "admission", "learned", "time_value"] = "lru"
     batch_invariant: bool = False
     block_tokens: Literal[64] = 64
     gpu_bytes: int = Field(default=0, ge=0, le=64 * 2**30)
@@ -22,6 +22,7 @@ class KVConfig(BaseModel):
     model_dir: str = ""
     restore: Literal["always", "never", "gate"] = "always"
     cost_profile: str = ""
+    retention_profile: str = ""
     margin_ms: float = Field(default=0.5, ge=0, allow_inf_nan=False)
     audit_path: str = ".agent/kv-events.jsonl"
 
@@ -34,6 +35,10 @@ class KVConfig(BaseModel):
             raise ValueError("CPU/SSD KV requires batch_invariant=true for consistent cached and recomputed outputs")
         if self.policy != "lru" and not self.model_dir:
             raise ValueError("Learned policies require a trusted local model_dir")
+        if bool(self.retention_profile) != (self.policy == "time_value"):
+            raise ValueError("Only time_value requires an explicit retention_profile")
+        if self.policy == "time_value" and (self.restore != "always" or self.ssd_write != "eager"):
+            raise ValueError("time_value is calibrated for always restore and eager SSD writes")
         if self.restore == "gate" and not self.cost_profile:
             raise ValueError("Cost gate requires an explicit calibrated cost_profile")
         if self.tier == "ssd" and self.restore != "always":
@@ -65,6 +70,11 @@ def transfer_config(server, root):
             if not path.exists():
                 raise FileNotFoundError(path)
             options[field] = str(path)
+    if config.retention_profile:
+        path = local_path(config.retention_profile, root)
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        options["retention_profile"] = str(path)
     if config.tier == "gpu":
         return None
     if server["max_num_seqs"] != 1 or server["dtype"] != "float16":
