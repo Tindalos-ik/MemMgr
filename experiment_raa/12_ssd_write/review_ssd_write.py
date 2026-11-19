@@ -32,6 +32,7 @@ def replay(path, warm, records, env, mode):
                if Path(name).parent.as_posix() == "memmgr/short_term"}
     require(ctx["cpu_blocks"] == slots_total and ctx["gpu_blocks"] == env["gpu_bytes"] // stride
             and ctx["gpu_bytes"] == env["gpu_bytes"] and ctx["batch_invariant"] is True
+            and ctx["gpu"].split(",", 1)[0] in env["gpu"]
             and ctx["source"] == sources and ctx["identity"] == init["identity"]
             and ctx["model_sha256"] == init["model_sha256"],
             path, "运行上下文与启动清单不符")
@@ -192,6 +193,8 @@ def replay(path, warm, records, env, mode):
         require(req["closed"] and req["loaded_keys"] == req["candidate_keys"], path, f"请求没有完整结束: {rid}")
     stats["ssd_end_files"] = len(disk)
     stats["cpu_end_blocks"] = len(occupied)
+    stats["audit_start_ns"] = init["time_ns"]
+    stats["audit_shutdown_ns"] = events[-1]["time_ns"]
     return tracked, stats, ctx, (before, start, end)
 
 
@@ -255,6 +258,7 @@ def group(root, workload, epoch, mode, env, predictor, plan, warm):
     tokens = [row["tokens"] for row in warm_rows + rows]
     chain_blocks = sum(len(row["chain_positions"]) for row in rows)
     stats = dict({key: counts[key] for key in ("cpu_start_blocks", "cpu_peak_blocks", "cpu_end_blocks", "cpu_evictions",
+                 "audit_start_ns", "audit_shutdown_ns",
                  "ssd_write_pinned_peak", "ssd_store_blocks", "ssd_load_blocks", "ssd_start_files", "ssd_end_files",
                  "promotion_triggered_write_blocks", "slot_wait_count", "slot_wait_seconds", "slot_wait_max_seconds")},
                  **io, **admission, disk_bytes=disk["bytes"], logical_write_bytes=write, logical_read_bytes=read,
@@ -313,6 +317,9 @@ def main():
     require(predictor.sha256 == model, root, "GBDT 摘要不符")
     warm = joint.read_json(root / "plans/warmup.json")
     results = {workload: compare(root, env, workload, predictor, warm) for workload in run.WORKLOADS}
+    ordered = [results[workload][f"epoch-{epoch}"]["groups"][mode] for workload, epoch, mode in run.GROUPS]
+    require(all(a["audit_shutdown_ns"] < b["audit_start_ns"] for a, b in zip(ordered, ordered[1:])),
+            root, "服务未按正反序逐组关闭再启动")
     print(json.dumps(dict(status="complete", environment_sha256=capacity.digest(root / "environment.json"),
                           output=str(root), workloads=results), ensure_ascii=False, indent=2))
 
