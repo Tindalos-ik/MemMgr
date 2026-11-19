@@ -11,3 +11,17 @@
 Linux 来宾使用 `/dev/sdd` 上的 ext4。Windows 侧核对 WSL 的 `ext4.vhdx` 位于 `C:`，其磁盘编号 0 对应 `HFS512GEJ9X125N` NVMe SSD。宿主介质证据见 `.agent/kv-ssd-cost/host-storage.txt`。来宾 `O_DIRECT` 和 Linux I/O 计数不覆盖宿主缓存及 NVMe 控制器。
 
 独立文件层验收使用 vLLM 原生共享内存与 `O_DIRECT`：相同 1 个 CPU 候选和 2 个 SSD 候选，允许分支完成 2 次提升并读取 3,670,016 字节，加载内容逐字节一致；拒绝分支无提升、无读任务，两侧 CPU 块均命中。该验收未运行 GPU 或模型，原始审计见 `.agent/kv-ssd-cost/local-verification.log`。
+
+## GPU 混合前缀验收
+
+同一 449-token 输入，两臂均命中 128 GPU token，且有相同的 2 个 CPU 块和 2 个 SSD 候选。回迁臂提升 2 个 SSD 块并搬运 4 个 CPU 块；重算臂无 SSD 提升或读取，仍搬运 2 个原有 CPU 块。8 个生成 token ID 完全一致。
+
+| 指标 | 回迁 | 重算 |
+| --- | ---: | ---: |
+| SSD→CPU 读任务 / 提交至观察完成（ms） | 4.799 / 6.145 | 0 / 0 |
+| CPU→GPU DMA（ms） | 1.428 | 1.174 |
+| 引擎 / 来宾实读（字节） | 3,670,016 / 3,670,016 | 0 / 0 |
+| 重算 token | 65 | 193 |
+| 服务端 / 客户端 TTFT（ms） | 109.553 / 112.011 | 157.018 / 163.218 |
+
+仅 1 对，用于验证干预和计数器，不进入门槛校准。原始数据及复核：`.agent/kv-ssd-cost/smoke-paired/`。
