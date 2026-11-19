@@ -13,3 +13,18 @@
 `time_value` 的 39 次计价中有 29 次缩短或拒绝写入；相对 `learned` 少写 63 块，多重算 7,616 token。此处不报告端到端 TTFT：CPU 命中为基于真实历史输入的反事实。
 
 原始结果：`.agent/kv-time-value/historical/{review.json,pilot.json,time_value.jsonl}`。
+
+## 正式 CPU 路径校准
+
+RTX 4050 Laptop GPU、Qwen2.5-1.5B-Instruct FP16、vLLM 0.29.0，GPU 32 MiB（18 块）、CPU 28 MiB（16 块），64 token/块。所有探测 GPU 零命中；CPU 回迁组命中完整指定前缀，重算组外层零命中。16 对各生成 8 token，逐 token 一致。校准计划的 33 个首块和正式评价的 29 个首块互斥，两个集合也均与实验 06 的计划分离。
+
+| 回迁块数 | 输入 token | 配对数 | 重算 − CPU 回迁 TTFT 中位差（ms） | GPU→CPU 写入中位数（ms） |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 129 | 4 | 37.141 | 1.047 |
+| 4 | 321 | 4 | 64.663 | 7.826 |
+| 8 | 577 | 4 | 151.235 | 7.728 |
+| 16 | 1,080 | 4 | 375.026 | 14.904 |
+
+策略使用的 CPU 写入估计为 1.007 ms/块。盘层配置需要自己的 CPU、SSD、重算三臂校准；此处这份文件只适用 CPU-only。
+
+原始路径：`.agent/kv-time-value/run-13/calibration-cpu/`。冻结成本文件 `profile-cpu.json` 的 SHA-256：`0a08a9205615568bc24471bfe2704b3a570ea965b11ac1f1ba5f6706e179763d`。
