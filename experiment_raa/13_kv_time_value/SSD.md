@@ -22,3 +22,9 @@
 实测写入估计为 1.446 ms/块（GPU→CPU）和 5.986 ms/块（首次 SSD 写入）；保留负的 SSD 差值，按锚点差值计算边际量。校准只使用实验 13 独立校准输入；SSD 评价不读取 CPU-only profile。设备范围为当前 WSL `/dev/sdd` ext4 O_DIRECT、eager、单序列及 1–16 块，未校准混合层几何。
 
 `profile-ssd.json` SHA-256 `b27ced277d8d0e25ec00d52980745b167e5a4abbc4d6a84af33597ecedffc188`；`review-ssd-calibration.json` SHA-256 `7ac67bcb16cf29a56b56f668cdbeb99a4f4e43a1c0953980295bbd6a235f5143`。两者在 `.agent/kv-time-value/run-13/`。
+
+## 未见计划的逐组证据
+
+沿用同一冻结的 88 条正式请求（24 条复访）和 1 条预热。每组保留原始输出 ID、请求审计、原始 Prometheus 快照、进程 I/O 和锁证据。
+
+- `admission`：24 条完成 184 块 SSD→CPU→GPU 读回链，盘写 112 块。Linux 进程树实读 337,641,472 字节，与盘读逻辑字节一致。原始目录 `eval-ssd/admission/`，`complete.json` SHA-256 `0bcce08e9343fd6ccb65c5b4c78924fb8e85f9ad47dcf69200094e72b9975c7e`，`review-ssd-admission.json` SHA-256 `a8d4175538eb0bf09cad19537b0e00f93e1a9e7abf6afd819f390f1989f4f1cc`。

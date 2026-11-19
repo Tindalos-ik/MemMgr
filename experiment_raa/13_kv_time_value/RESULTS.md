@@ -54,6 +54,6 @@ RTX 4050 Laptop GPU、Qwen2.5-1.5B-Instruct FP16、vLLM 0.29.0，GPU 32 MiB（18
 
 三组 SSD 逻辑读写均为 0。进程树 Linux 实读均为 0，实写分别为 294,912 / 327,680 / 368,640 字节，含审计与日志等进程文件 I/O。`time_value` 的全体配对 P95 和两组对照下的复访 TTFT 都恶化，当前数据不支持默认启用。三组各成功采集一次，运行时间段不同，TTFT 可能受设备状态变化影响。
 
-本次 GPU 结论仅限上述设备的单序列 CPU-only 压力回放。正式 connector 支持从已发布的 SSD 副本取替代路径成本，但未采集新策略的 SSD GPU 三组对照；CPU profile 不能用于 SSD。未校准 `on_evict`、并行序列或混合层几何。
+本页 GPU 结论仅限上述设备的单序列 CPU-only 压力回放。[eager SSD 的独立校准与评价](SSD.md) 使用专用 profile。两种 profile 不可混用；未校准 `on_evict`、并行序列或混合层几何。
 
 原始数据：`.agent/kv-time-value/run-13/`。`review-cpu.json` 的 SHA-256：`6890d76aefca30c5c5a5af14894b7bfee6b07e26f29e06df96ce7b4052132e0e`。
