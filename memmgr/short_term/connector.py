@@ -335,6 +335,12 @@ class ManagedTieringManager(TieringOffloadingManager):
         super().complete_load(keys, req_context)
         self.control.emit("loaded", request_id=req_context.req_id, keys=[key.hex() for key in keys])
 
+    def _maybe_finalize_request(self, req_id, exclude_tier_idx=None):
+        """为 req_id 确认最后一批 SSD 任务已提交；exclude_tier_idx 沿用原生排除规则。"""
+        super()._maybe_finalize_request(req_id, exclude_tier_idx)
+        if req_id not in self._req_state:
+            self.control.emit("ssd_request_closed", request_id=req_id)
+
     def _initiate_promotion(self, tier_idx, key, req_context):
         """从 tier_idx 为 req_context 提升 key，记录实际 CPU 淘汰。"""
         before = set(self.primary_tier._policy.blocks)
