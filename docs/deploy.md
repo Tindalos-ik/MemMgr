@@ -1,4 +1,24 @@
 # 部署与使用
+### CPU 分层 KV 配置
+
+默认服务使用 GPU 前缀缓存。要在显存紧张时将完整的 64-token 前缀块保留到 CPU，可在单独的服务配置中设置 `kv_cache`，通过上面的 `--server` 参数启动。下面的配置为 CPU 缓存分配 64 MiB，使用 LRU 淘汰；模型使用 FP16，服务端 `max_num_seqs` 须为 1。
+
+```json
+{
+  "tier": "cpu",
+  "batch_invariant": true,
+  "cpu_bytes": 67108864,
+  "policy": "lru",
+  "restore": "always"
+}
+```
+
+要启用预测淘汰与成本控制，请准备两份与本次运行匹配的文件：
+
+1. 从一次完整 LRU 采集的审计日志训练 GBDT：`python -m memmgr.short_term.train --audit <审计日志> --output .agent/kv-model`。输出目录须尚不存在。设置 `policy: "learned"`、`model_dir: ".agent/kv-model"`，只加载可信的本地模型。
+2. 用该模型、相同设备和相同缓存容量，分别以 `restore: "always"` 和 `"never"` 回放相同的校准请求。每个运行目录须包含 `audit.jsonl` 和 `requests.jsonl`，每种命中组合至少采集两对观测。执行 `python -m memmgr.short_term.cost --pair <always目录> <never目录> --output .agent/kv-cost.json`；多组目录可重复传入 `--pair`。
+3. 设置 `restore: "gate"` 和 `cost_profile: ".agent/kv-cost.json"` 后重启。`margin_ms` 默认为 0.5；只有预计节省的时间超过该值才从 CPU 回迁。出现未校准的命中组合会报错。SSD 模式目前只支持 `restore: "always"`。
+
 
 ## 1. 准备环境
 
