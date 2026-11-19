@@ -102,8 +102,8 @@ def replay(directory, records, profile=None):
                 raise ValueError(f"Previous request still owns unfinished SSD work: {request_id}")
             if request_id in requests:
                 raise ValueError("Duplicate request in SSD audit")
-            active = dict(keys=event["keys"], gpu_store=set(), gpu_load=set(), drive_read=set(), drive_write=set(),
-                          closed=False, pricing=None, lookups=0, priced_ssd=0)
+            active = dict(keys=event["keys"], gpu_store=set(), gpu_load=set(), drive_read=Counter(),
+                          drive_write=set(), closed=False, pricing=None, lookups=0, priced_ssd=0)
             requests[request_id] = active
             for depth, key in enumerate(event["keys"], 1):
                 parent = event["keys"][depth - 2] if depth > 1 else None
@@ -196,16 +196,20 @@ def replay(directory, records, profile=None):
             active["priced_ssd"] += counts["priced_incoming_ssd"] + counts["priced_victim_ssd"]
             if request_id != next(iter(requests)):
                 stats.update(counts)
-                for field in ("incoming", "victims"):
-                    priced = next((row for row in event[field] if row[2] == "ssd"), None)
-                    if field not in witnesses and priced is not None:
+                for field, name, selected in (("incoming", "incoming", active["pricing"][0]),
+                                              ("victims", "victims", active["pricing"][1]),
+                                              ("incoming", "incoming_selected", active["pricing"][0]),
+                                              ("victims", "victims_selected", active["pricing"][1])):
+                    priced = next((row for row in event[field] if row[2] == "ssd"
+                                   and (field == name or row[0] in selected)), None)
+                    if name not in witnesses and priced is not None:
                         key, probability, _, gain, *write = priced
                         published = disk[key]
-                        witnesses[field] = dict(key=key, request_id=request_id, decision_ns=ts,
-                                                published_ns=published["time_ns"], publish_job=published["job"],
-                                                publish_request_id=published["request_id"], depth=depths[key],
-                                                probability=probability, value_seconds=gain,
-                                                **({"write_seconds": write[0]} if write else {}))
+                        witnesses[name] = dict(key=key, request_id=request_id, decision_ns=ts,
+                                               published_ns=published["time_ns"], publish_job=published["job"],
+                                               publish_request_id=published["request_id"], depth=depths[key],
+                                               probability=probability, value_seconds=gain, selected=key in selected,
+                                               **({"write_seconds": write[0]} if write else {}))
         elif kind == "ssd_request_closed":
             active["closed"] = True
         elif kind not in ("retain", "ssd_slot_wait"):
@@ -214,15 +218,21 @@ def replay(directory, records, profile=None):
         raise ValueError("SSD audit did not drain or differs from captured request sequence")
     for row, request in zip(records, requests.values(), strict=True):
         if (not request["closed"] or request["lookups"] != 1 or request["pricing"] is not None
-                or request["gpu_load"] != request["matched"] or not request["drive_read"] <= request["gpu_load"]):
-            raise ValueError(f"Incomplete SSD→CPU→GPU chain for {row['request_id']}")
-        for field, name in (("cpu_write_blocks", "gpu_store"), ("cpu_read_blocks", "gpu_load"),
-                            ("ssd_read_blocks", "drive_read"), ("ssd_write_blocks", "drive_write")):
-            if row[field] != len(request[name]):
+                or request["gpu_load"] != request["matched"]):
+            raise ValueError(f"Incomplete CPU→GPU chain for {row['request_id']}")
+        reads = request["drive_read"]
+        physical = reads.total()
+        for field, value in (("cpu_write_blocks", len(request["gpu_store"])), ("cpu_read_blocks", len(request["gpu_load"])),
+                             ("ssd_read_blocks", physical), ("ssd_write_blocks", len(request["drive_write"]))):
+            if row[field] != value:
                 raise ValueError(f"SSD audit and transfer counters differ: {row['request_id']}, {field}")
         if row["index"]:
-            stats["full_ssd_chain_requests"] += bool(request["drive_read"])
-            stats["full_ssd_chain_blocks"] += len(request["drive_read"])
+            forwarded = request["gpu_load"] & reads.keys()
+            stats["full_ssd_chain_requests"] += bool(forwarded)
+            stats["full_ssd_chain_blocks"] += len(forwarded)
+            stats["physical_ssd_read_blocks"] += physical
+            stats["repeated_ssd_read_blocks"] += physical - len(reads)
+            stats["ssd_read_not_forwarded_blocks"] += len(reads) - len(forwarded)
             stats["published_replica_pricing_requests"] += bool(request["priced_ssd"])
     paths = list((directory / "ssd").rglob("*.bin"))
     if len(paths) != len(disk) or any(path.stat().st_size != BLOCK_BYTES for path in paths):

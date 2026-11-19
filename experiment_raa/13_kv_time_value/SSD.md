@@ -28,3 +28,4 @@
 沿用同一冻结的 88 条正式请求（24 条复访）和 1 条预热。每组保留原始输出 ID、请求审计、原始 Prometheus 快照、进程 I/O 和锁证据。
 
 - `admission`：24 条完成 184 块 SSD→CPU→GPU 读回链，盘写 112 块。Linux 进程树实读 337,641,472 字节，与盘读逻辑字节一致。原始目录 `eval-ssd/admission/`，`complete.json` SHA-256 `0bcce08e9343fd6ccb65c5b4c78924fb8e85f9ad47dcf69200094e72b9975c7e`，`review-ssd-admission.json` SHA-256 `a8d4175538eb0bf09cad19537b0e00f93e1a9e7abf6afd819f390f1989f4f1cc`。
+- `learned`：88 条输出与 `admission` 逐 token 一致。24 条回访读盘 190 块，其中 188 个同请求唯一块完成整链。请求 `cmpl-tv13-0066-0-9a3a5d9e` 的两个块在同请求中读盘两次；原生盘读计 190，整链不重复计两次。进程树实读 348,651,520 字节。原始目录 `eval-ssd/learned/`，`complete.json` SHA-256 `3b4a7eb281fde110acd06a2692efb05b7450d0fbbc6b191bafa78e09a2dde20e`，`review-ssd-learned.json` SHA-256 `be2b9efb1cc5db08bea496abc1930bc87b9ca100adb353082627ca8541c345b7`。
