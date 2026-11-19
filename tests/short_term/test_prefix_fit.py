@@ -13,6 +13,7 @@ from vllm.v1.request import Request
 
 from memmgr.short_term.connector import ManagedCPUManager, PolicyController
 from memmgr.short_term.prefix_fit import fit_prefix
+from memmgr.short_term.train import train
 
 
 class PrefixCapacity(unittest.TestCase):
@@ -20,20 +21,20 @@ class PrefixCapacity(unittest.TestCase):
 
     def setUp(self):
         """为每个用例创建独立审计目录和原生哈希器。"""
-        directory = self.enterContext(TemporaryDirectory())
-        self.audit = Path(directory) / "audit.jsonl"
+        self.directory = Path(self.enterContext(TemporaryDirectory()))
         init_none_hash(sha256)
         self.hasher = get_request_block_hasher(64, sha256)
 
-    def manager(self, capacity):
-        """创建 capacity 个槽的 CPU 管理器，绑定正式 LRU 控制器。"""
+    def manager(self, capacity, policy="lru", model_dir=""):
+        """创建 capacity 槽的正式 CPU 管理器；policy 可加载 model_dir 中的冻结模型。"""
         # CPU spec 依赖 GPU 布局；此处调用正式管理器使用的同一原生构造函数。
         manager = ManagedCPUManager.__new__(ManagedCPUManager)
         CPUOffloadingManager.__init__(manager, capacity, cache_policy="ManagedLRU",
                                       cache_policy_module_path=ManagedCPUManager.__module__)
         manager.control = PolicyController(manager, dict(
             max_model_len=2048, dtype="float16", model_revision="test",
-            policy_config=dict(policy="lru", audit_path=self.audit)))
+            policy_config=dict(policy=policy, audit_path=self.directory / f"{policy}.jsonl",
+                               model_dir=model_dir)))
         self.addCleanup(manager.shutdown)
         return manager
 
@@ -100,6 +101,32 @@ class PrefixCapacity(unittest.TestCase):
         self.assertEqual(fit_prefix(manager, incoming, incoming, offered, parents)[0], [])
         manager.complete_load(resident[1:], old)
         self.assertEqual(fit_prefix(manager, incoming, incoming, offered, parents)[0], incoming)
+
+    def test_frozen_policies_keep_capacity_across_split_batches(self):
+        """用实际训练的准入和 learned 策略分两批处理同一超长前缀。"""
+        collector = self.manager(8)
+        tokens = tuple(range(1, 17))
+        for batch in range(6):
+            for index in range(4):
+                self.begin(collector, f"warm-{batch}-{index}", *tokens)
+            self.begin(collector, f"cold-{batch}", 100 + batch, *tokens[1:])
+        model = self.directory / "model"
+        train(collector.control.path, model, horizon=1)
+
+        for policy in ("admission", "learned"):
+            with self.subTest(policy=policy):
+                manager = self.manager(8, policy, model)
+                for index in range(2):
+                    self.begin(manager, f"history-{index}", *tokens)
+                request, keys = self.begin(manager, "split", *tokens)
+                first = manager.prepare_store(keys[:1] + keys[2:4], request)
+                self.assertEqual(first.keys_to_store, keys[:1])
+                manager.complete_store(first.keys_to_store, request)
+                tail = manager.prepare_store(keys[1:], request)
+                self.assertEqual(tail.keys_to_store, keys[1:8])
+                manager.complete_store(tail.keys_to_store, request)
+                self.assertTrue(all(manager.lookup(key, request) is LookupResult.HIT for key in keys[:8]))
+                self.assertEqual(manager.lookup(keys[8], request), LookupResult.MISS)
 
     def test_failed_dma_still_propagates(self):
         """原生写入失败传递到调用方，不被解释为前缀容量不足。"""

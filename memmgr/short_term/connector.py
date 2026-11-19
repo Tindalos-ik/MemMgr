@@ -254,12 +254,20 @@ class PolicyController:
         if not offered <= set(state["keys"]):
             raise RuntimeError("Decode or unknown block offered for prompt-only storage")
         learned = self.options["policy"] == "learned"
+        parents = self.parents if learned else None
+        first = "selected" not in state
         admitted = state["admitted"]
-        if learned and "selected" in state:
+        if learned and not first:
             admitted = admitted[:len(state["selected"])]
         selected, self.protected = fit_prefix(
-            self.primary, state["keys"], admitted, offered, self.parents if learned else None)
-        if "selected" not in state:
+            self.primary, state["keys"], admitted, None if learned and first else offered, parents)
+        if learned and first:
+            # 先冻结完整的保留决定；本批 GPU 尚无的块不得留下写入空洞。
+            for index, key in enumerate(selected):
+                if key not in offered and key not in self.primary._policy.blocks:
+                    offered.intersection_update(selected[:index])
+                    break
+        if first:
             if self.options["policy"] == "learned":
                 self.refresh_scores(list(dict.fromkeys([*state["keys"], *self.primary._policy.blocks])))
                 missing = [key for key in selected if key not in self.primary._policy.blocks]
