@@ -25,6 +25,7 @@ from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 from .cost import CostPolicy
+from .prefix_fit import fit_prefix
 from .reuse import History, Predictor
 
 
@@ -67,7 +68,7 @@ class ManagedLRU(LRUCachePolicy):
     def evict(self, n, protected):
         """原子淘汰 n 个块；protected 保留调用者正在使用的块。"""
         if self.controller.options["policy"] != "learned":
-            return super().evict(n, protected)
+            return super().evict(n, protected | self.controller.protected)
         candidates = self.plan(n, protected | self.controller.protected)
         if candidates is not None:
             for key, _ in candidates:
@@ -139,13 +140,18 @@ class PolicyController:
                   policy_seconds=time.perf_counter() - started)
 
     def select(self, keys, req_context):
-        """按 req_context 的冻结决定筛选 keys，并保护当前请求全部前缀块。"""
+        """按 req_context 的准入和现有容量筛选本批 keys，保护已驻留的连续前缀。"""
         state = self.active[req_context.req_id]
-        if not set(keys) <= set(state["keys"]):
+        offered = set(keys)
+        if not offered <= set(state["keys"]):
             raise RuntimeError("Decode or unknown block offered for prompt-only storage")
-        self.protected = set(state["keys"])
+        learned = self.options["policy"] == "learned"
+        admitted = state["admitted"]
+        if learned and "selected" in state:
+            admitted = admitted[:len(state["selected"])]
+        selected, self.protected = fit_prefix(
+            self.primary, state["keys"], admitted, offered, self.parents if learned else None)
         if "selected" not in state:
-            selected = state["admitted"]
             if self.options["policy"] == "learned":
                 self.refresh_scores(list(dict.fromkeys([*state["keys"], *self.primary._policy.blocks])))
                 missing = [key for key in selected if key not in self.primary._policy.blocks]
@@ -161,7 +167,7 @@ class PolicyController:
                           displaced=displaced, required=required,
                           victims=[key.hex() for key, _ in victims], accepted=bool(selected))
             state["selected"] = set(selected)
-        return [key for key in keys if key in state["selected"]]
+        return [key for key in selected if key in offered]
 
 
 class ManagedCPUManager(CPUOffloadingManager):
