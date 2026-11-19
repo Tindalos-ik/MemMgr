@@ -2,12 +2,16 @@
 
 复用[实验 08 冻结 78 条](../08_kv_capacity/results-14.md)的正式请求和 1,025-token 预热。CPU 配额 14 MiB（8 个 64-token 块），GPU 配额 32 MiB；SSD-LRU 使用单独的空 SSD 目录、4 GiB 配额及 `O_DIRECT`。两组统一使用正式 `ManagedConnector` 与 `always` 回迁。
 
+CPU 写入保留已驻留的连续命中，按空闲槽及可淘汰槽截断待写前缀。GPU 和 SSD 在途引用仍由原生计数保护；实际分配或传输错误会直接报错。
+
+[14 MiB 实测结果与原始工件摘要](RESULTS.md)
+
 ## 采集
 
 在 WSL Linux 的项目根目录运行。输出目录须不存在；中断后另选目录保留原始工件。
 
 ```bash
-OUT=.agent/kv-prefix-capacity-11/frozen-14
+OUT=.agent/kv-prefix-capacity-11/replay-14
 PYTHON=.venv/bin/python
 RUN=experiment_raa.11_kv_prefix_capacity.run_prefix_capacity
 "$PYTHON" -m "$RUN" --output "$OUT"
