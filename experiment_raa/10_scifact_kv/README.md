@@ -37,3 +37,12 @@ CUDA_VISIBLE_DEVICES='' "$PYTHON" -m experiment_raa.10_scifact_kv.verify_scifact
 每个顺序阶段中，三个策略各启动一个真实 vLLM 进程。策略执行顺序为 `lru → admission → learned` 及其反序；序列执行顺序也反转，序列内的请求位置不变。每条序列开始前通过 vLLM 清空 GPU 和 CPU 缓存，同时清空策略访问历史，首个请求必须零命中。三组均使用 32 MiB GPU 和 56 MiB CPU KV 预算、64-token 块、串行贪心生成（最多 64 个输出 token），并允许回迁所有实际可用的连续 CPU 前缀。`admission` 和 `learned` 使用同一冻结模型做写入准入，只有 `learned` 使用复用评分决定保留和淘汰；本实验不启用实验 06 的回迁成本表。
 
 `audit.jsonl` 记录实际策略事件及纳秒级分段计时；每条序列保留流响应的实际输出 token ID 和逐请求 Prometheus 原始快照。特征计时涵盖历史更新及模型特征读取，评分计时涵盖真实非空模型批次，保留和淘汰单列并扣除内层特征、评分与审计写入。客户端 TTFT 从发起生成请求到首个带输出 token ID 的流事件；服务端使用 vLLM 的逐请求 TTFT 指标。两者都不含检索时间。
+
+## 计算配对结果
+
+```bash
+CUDA_VISIBLE_DEVICES='' "$PYTHON" -m experiment_raa.10_scifact_kv.evaluate_scifact \
+  "$D/replay" "$D/evaluation"
+```
+
+评估器离线复核完整的两轮结果，然后在新目录输出 `review.json` 和 `per_request.jsonl`。配对键是顺序阶段、序列和请求位置；差值为处理策略减对照策略，负值代表处理策略更快。P95 取最近秩；95% 区间以整条序列为单位进行 5,000 次配对 bootstrap，同一序列的正反两轮一起抽样。六个序列的小样本区间仅描述该回放的不确定性。
