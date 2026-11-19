@@ -171,31 +171,71 @@ def capture_group(args, directory, group, plan, warmup):
                     process.wait()
 
 
-def collect(args, plan, warmup, epochs):
-    """按 epochs 启动 args 的独立分组；失败组保留证据，其他组继续原计划。"""
+def collect_group(args, epoch, group, plan, warmup):
+    """运行 args 的一个 epoch/group，保存 plan 与 warmup 的成功标记或失败证据。"""
+    ssd.require_idle_gpu()
+    directory = args.output / f"epoch-{epoch}" / group
+    directory.mkdir(parents=True)
+    print(f"开始 {epoch}/{group}", flush=True)
+    try:
+        capture_group(args, directory, group, plan, warmup)
+    except (RuntimeError, OSError, ValueError, httpx.HTTPError, psutil.Error) as error:
+        failure = dict(epoch=epoch, group=group, error=type(error).__name__, detail=str(error),
+                       traceback=traceback.format_exc())
+        joint.save(directory / "failure.json", failure)
+        print(f"失败 {epoch}/{group}: {error}", flush=True)
+        return
+    ssd.mark_complete(directory, epoch=epoch, group=group, requests=len(plan), warmup_requests=len(warmup))
+    print(f"完成 {epoch}/{group}", flush=True)
+
+
+def collect(args, plan, warmup, epochs, one_group):
+    """按 epochs 采集 args；one_group 时只执行下一组，让调用者逐组释放 GPU 锁。"""
     failures = []
+    captured = False
+    capture_failed = False
+    if any((args.output / marker).exists() for marker in ("complete.json", "failures.json")):
+        raise ValueError(f"阶段已有终结标记: {args.output}")
     for epoch, groups in enumerate(epochs):
         for group in groups:
-            ssd.require_idle_gpu()
             directory = args.output / f"epoch-{epoch}" / group
-            directory.mkdir(parents=True)
-            print(f"开始 {epoch}/{group}", flush=True)
-            try:
-                capture_group(args, directory, group, plan, warmup)
-            except (RuntimeError, OSError, ValueError, httpx.HTTPError, psutil.Error) as error:
-                failure = dict(epoch=epoch, group=group, error=type(error).__name__, detail=str(error),
-                               traceback=traceback.format_exc())
-                joint.save(directory / "failure.json", failure)
+            done, failed = ((directory / name).is_file() for name in ("complete.json", "failure.json"))
+            if done and failed:
+                raise ValueError(f"组的失败和完成标记并存: {directory}")
+            if not (done or failed):
+                if captured and one_group:
+                    return 2 if capture_failed else 0
+                collect_group(args, epoch, group, plan, warmup)
+                captured = True
+                failed = (directory / "failure.json").is_file()
+                capture_failed = failed
+            if failed:
                 failures.append([epoch, group])
-                print(f"失败 {epoch}/{group}: {error}", flush=True)
-                continue
-            ssd.mark_complete(directory, epoch=epoch, group=group, requests=len(plan), warmup_requests=len(warmup))
-            print(f"完成 {epoch}/{group}", flush=True)
     if failures:
         joint.save(args.output / "failures.json", dict(status="failed_groups", failures=failures, epochs=epochs))
         return 2
     ssd.mark_complete(args.output, epochs=epochs, requests_per_group=len(plan), warmup_requests_per_group=len(warmup))
     return 0
+
+
+def reopen(args):
+    """校验 args 与已有阶段的冻结环境及工件，用于逐组采集下一组。"""
+    saved = ssd.load(args.output / "environment.json")
+    if any(str(value) != str(saved["arguments"][key]) for key, value in vars(args).items()):
+        raise ValueError(f"继续采集时参数与原阶段不同: {args.output}")
+    if any(metadata.version(name) != version for name, version in saved["packages"].items()):
+        raise ValueError("阶段采集中软件版本发生改变")
+    if any(joint.digest(ROOT / name) != digest for name, digest in saved["source_sha256"].items()):
+        raise ValueError("阶段采集中源码发生改变")
+    if any(joint.digest(args.output / name) != digest for name, digest in saved["artifacts_sha256"].items()):
+        raise ValueError("阶段采集中冻结工件发生改变")
+    for key in ("seed", "env", "server"):
+        setattr(args, key, saved["arguments"][key])
+    args.model = Path(saved["arguments"]["model"])
+    if joint.digest(args.model / "config.json") != saved["model_config_sha256"]:
+        raise ValueError("阶段采集中 Qwen 配置发生改变")
+    name = "pressure" if args.pressure_policies else "eval"
+    return ssd.load(args.output / f"plans/{name}.json"), ssd.load(args.output / "plans/warmup.json"), saved["epochs"]
 
 
 def main():
@@ -206,12 +246,15 @@ def main():
     parser.add_argument("--cpu-mib", type=int, choices=(56, 28, 14), required=True)
     parser.add_argument("--port", type=int, default=18088)
     parser.add_argument("--pressure-policies", choices=POLICIES, nargs="+", default=[])
+    parser.add_argument("--one-group", action="store_true", help="每次只运行一组，完成后可释放共享 GPU 锁")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535 or len(set(args.pressure_policies)) != len(args.pressure_policies):
         parser.error("端口越界或压力策略重复")
     args.source = ssd.local_path(args.source, ROOT)
     args.output = ssd.local_path(args.output, ROOT)
-    return collect(args, *prepare(args))
+    one_group = vars(args).pop("one_group")
+    prepared = reopen(args) if one_group and args.output.exists() else prepare(args)
+    return collect(args, *prepared, one_group)
 
 
 if __name__ == "__main__":

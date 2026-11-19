@@ -25,6 +25,8 @@ flock -x .agent/kv-experiment-gpu.lock "$PYTHON" \
 
 盘层使用项目 `.agent/` 文件系统，须支持 `O_DIRECT`。`--source` 默认读取 `.agent/kv-joint-ssd/output`。组失败会留下日志和 `failure.json`，阶段内其他组按原容量运行；采集退出码 `2` 表示存在失败组。重跑时另选输出目录。
 
+GPU 需轮转时，在同一条 `flock` 命令末尾加 `--one-group`。每次只运行下一组，进程退出即释放锁。以相同参数和输出目录继续，直到生成根 `complete.json` 或 `failures.json`；已结束的组不会重跑，中断且未生成标记的目录须保留另查。
+
 ### 零回迁的压力计划
 
 单独运行出现零回迁的策略，比较同策略 CPU 与 CPU+SSD。压力计划取十个独立的 513-token 热前缀，各连续访问四次，再按同序复访；同一前缀的第四次访问到复访之间相隔 9–36 条请求。该计划共 50 条，不并入正式 78 条结果。
