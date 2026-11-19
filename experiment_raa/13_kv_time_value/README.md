@@ -17,7 +17,7 @@ CUDA_VISIBLE_DEVICES='' "$PYTHON" -m "$MOD.historical" "$ROOT/historical"
 
 ## 独立校准并测量
 
-每个 `flock` 只运行一个 vLLM 服务，服务停止后退出并释放 Linux GPU 锁。输出目录须为新路径。所有组用同一预热、同一冻结评价输入、28 MiB CPU 和 32 MiB GPU KV 配额。默认端口为 18113；可通过 `--port` 选择其他空闲端口。
+每个 `flock` 只运行一个 vLLM 服务。采集器核对继承的 Linux 独占锁，服务进程也持有同一个描述符，停止后释放。输出目录须为新路径。所有组用同一预热、同一冻结评价输入、28 MiB CPU 和 32 MiB GPU KV 配额。默认端口为 18113；可通过 `--port` 选择其他空闲端口。
 
 ```bash
 D="$ROOT/run-13"

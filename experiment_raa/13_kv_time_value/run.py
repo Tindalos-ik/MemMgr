@@ -219,8 +219,27 @@ def capture(client, audit, previous, directory, index, config, tokens, tier):
     return counters, row
 
 
+def inherited_lock(path):
+    """找出 path 的同一 Linux flock 独占描述符，保证服务进程能够继承。"""
+    identity = path.stat()
+    for entry in Path("/proc/self/fd").iterdir():
+        try:
+            opened = entry.stat()
+        except FileNotFoundError:
+            # 枚举目录时使用的临时描述符可能已经关闭。
+            continue
+        if (opened.st_dev, opened.st_ino) != (identity.st_dev, identity.st_ino):
+            continue
+        info = (Path("/proc/self/fdinfo") / entry.name).read_text()
+        if any(line.startswith("lock:") and "FLOCK" in line.split() and "WRITE" in line.split()
+               for line in info.splitlines()):
+            return int(entry.name)
+    raise RuntimeError(f"Start each GPU service with flock -x {path}")
+
+
 def collect(args, config, plan, directory, profile):
     """启动一个服务，执行 args 指定的路径或策略，并在返回前等待进程停止。"""
+    lock_fd = inherited_lock(ROOT / ".agent/kv-experiment-gpu.lock")
     ssd.require_idle_gpu()
     directory.mkdir(parents=True)
     policy = "lru" if args.stage == "calibration" else args.arm
@@ -233,7 +252,8 @@ def collect(args, config, plan, directory, profile):
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", args.port))
     with log_path.open("x") as log:
-        process = subprocess.Popen(argv, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        process = subprocess.Popen(argv, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                   start_new_session=True, pass_fds=(lock_fd,))
         try:
             with httpx.Client(base_url=f"http://127.0.0.1:{args.port}", timeout=120, trust_env=False) as client:
                 joint.ready(client, process, args.port, log_path)
