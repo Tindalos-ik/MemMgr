@@ -29,3 +29,37 @@
 
 - `admission`：24 条完成 184 块 SSD→CPU→GPU 读回链，盘写 112 块。Linux 进程树实读 337,641,472 字节，与盘读逻辑字节一致。原始目录 `eval-ssd/admission/`，`complete.json` SHA-256 `0bcce08e9343fd6ccb65c5b4c78924fb8e85f9ad47dcf69200094e72b9975c7e`，`review-ssd-admission.json` SHA-256 `a8d4175538eb0bf09cad19537b0e00f93e1a9e7abf6afd819f390f1989f4f1cc`。
 - `learned`：88 条输出与 `admission` 逐 token 一致。24 条回访读盘 190 块，其中 188 个同请求唯一块完成整链。请求 `cmpl-tv13-0066-0-9a3a5d9e` 的两个块在同请求中读盘两次；原生盘读计 190，整链不重复计两次。进程树实读 348,651,520 字节。原始目录 `eval-ssd/learned/`，`complete.json` SHA-256 `3b4a7eb281fde110acd06a2692efb05b7450d0fbbc6b191bafa78e09a2dde20e`，`review-ssd-learned.json` SHA-256 `be2b9efb1cc5db08bea496abc1930bc87b9ca100adb353082627ca8541c345b7`。
+- `time_value`：24 条完成 163 块 SSD→CPU→GPU 读回链，无重复盘读。进程树实读 299,106,304 字节。原始目录 `eval-ssd/time_value/`，`complete.json` SHA-256 `54f3078e9a3f47a63d32ce2813acd1b2b0b93d4a1638f982a52a8bd473fa1d6d`，`audit.jsonl` SHA-256 `d2cf5c3a3df228ad052fb50e8ddb6f58e0300a7f24956d4323c2dee1882edb16`，`gpu-lock.json` SHA-256 `830c4dd1b7da9390d8705e5b463c925783dfa5b33ad44ee666f0e1e1188f16ec`。
+
+三组的输入、冻结准入、704 个正式输出 token ID 和 8 个预热输出 token ID 逐一一致。六个正式 GPU 服务时间窗互不重叠，子进程证据指向同一把 Linux 锁。
+
+## 已发布副本的保留计价
+
+正式窗口内 48 次计价，12 次缩短或拒绝写入。47 条请求触发已发布副本分支：111 次受害候选计价走 `ssd`，其中实际淘汰 90 块。126 个待写入候选走 `recompute`；本 workload 未观察到候选写入本身已有盘副本的分支。提升级的原生淘汰另计，不混入保留决策的 90 块。
+
+可定位样本：预热 `cmpl-tv13-0000-0-901df68f` 的 `fs_complete` 作业 0 在 `30452910617813 ns` 发布首块 `7b934c95…`；约 2.886 秒后，`cmpl-tv13-0002-0-a1d3562e` 将同一块作为 SSD 受害项计价。该块概率约 0.002850，应用 1 块 SSD 锚点后机会成本约 −0.024 ms；下一条 `store` 事件确认淘汰同一块。复核按事件时间重建当时可恢复的祖先链，并逐项重算路径、写入费用、受害机会成本和净收益；不使用稍后写盘的记录。
+
+正式请求的累计估值：复用收益 2,218.47 ms，减预计写入 780.34 ms 和受害机会成本 177.40 ms，净估值 1,260.73 ms。此值用于策略选择，实际 TTFT 未显示净改善。
+
+## 未见计划的配对结果
+
+| 策略 | CPU 写 / 读回块 | SSD 写 / 物理读块 | 重算 token | GPU→CPU / SSD 写入累计（ms） | SSD 读取累计（ms） |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `admission` | 112 / 192 | 112 / 184 | 22,616 | 197.04 / 673.63 | 604.01 |
+| `learned` | 96 / 192 | 96 / 190 | 22,616 | 136.06 / 607.86 | 543.39 |
+| `time_value` | 105 / 178 | 105 / 163 | 23,512 | 242.18 / 737.60 | 514.07 |
+
+配对差为处理组减对照组，按相同请求位置逐条相减。P95 为差值的最近秩。
+
+| 比较 | 窗口 | 服务端中位数 / P95（ms） | 客户端中位数 / P95（ms） |
+| --- | --- | ---: | ---: |
+| `learned − admission` | 全部 88 条 | −7.48 / +34.26 | −7.79 / +33.68 |
+| `time_value − admission` | 全部 88 条 | +2.68 / +58.09 | +3.71 / +61.59 |
+| `time_value − learned` | 全部 88 条 | +7.47 / +73.06 | +9.90 / +76.16 |
+| `learned − admission` | 24 条复访 | −3.78 / +28.79 | −3.75 / +25.15 |
+| `time_value − admission` | 24 条复访 | +2.68 / +55.43 | +2.30 / +73.10 |
+| `time_value − learned` | 24 条复访 | +7.15 / +71.31 | +6.20 / +75.56 |
+
+相对 `learned`，`time_value` 少读 27 次物理块（47.25 MiB），多写 9 块（15.75 MiB），多重算 896 token；TTFT 中位数和配对 P95 均变差。相对 `admission` 少写 7 块，少读 21 块，但也多重算 896 token。各策略只采集一轮，运行时段不同。证据限于本机串行 eager SSD 压力回放，支持保留原默认策略。
+
+原始数据 `.agent/kv-time-value/run-13/{calibration-ssd,eval-ssd}/`；三组复核 `review-ssd.json` SHA-256 `b6ca97b475f430bacd69d4962d9a89dfb0e97dbe9aba56fa9e0e666cbec55d49`。复核中的 `first_replica_pricing` 保留块的完整身份及发布、计价两处审计时点。
