@@ -18,6 +18,7 @@ class KVConfig(BaseModel):
     cpu_bytes: int = Field(default=64 * 2**20, ge=4 * 2**20, le=4 * 2**30)
     ssd_root: str = ".agent/kv-cache"
     ssd_bytes: int = Field(default=4 * 2**30, ge=16 * 2**20, le=1024 * 2**30)
+    ssd_write: Literal["eager", "on_evict"] = "eager"
     model_dir: str = ""
     restore: Literal["always", "never", "gate"] = "always"
     cost_profile: str = ""
@@ -36,7 +37,9 @@ class KVConfig(BaseModel):
         if self.restore == "gate" and not self.cost_profile:
             raise ValueError("Cost gate requires an explicit calibrated cost_profile")
         if self.tier == "ssd" and self.restore != "always":
-            raise ValueError("SSD cost gating requires a separately validated promotion cost model")
+            raise ValueError("SSD KV requires restore=always")
+        if self.tier != "ssd" and self.ssd_write == "on_evict":
+            raise ValueError("ssd_write=on_evict requires tier=ssd")
         return self
 
 
