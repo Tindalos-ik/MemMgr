@@ -47,7 +47,11 @@ def prepare(args):
     for name in INPUTS:
         copyfile(args.historical / name, args.output / name)
     frozen_plans(args.output, hashes)
-    environment = dict(reference, artifacts_sha256=hashes, historical=str(args.historical),
+    arguments = {name: reference["arguments"][name] for name in ("seed", "env", "server", "model")}
+    arguments.update(historical=str(args.historical), output=str(args.output), cpu_mib=14, port=args.port)
+    environment = dict(reference, arguments=arguments, epochs=[GROUPS], artifacts_sha256=hashes,
+                       command=[sys.executable, "-m", __spec__.name, *sys.argv[1:]],
+                       historical=str(args.historical),
                        historical_environment_sha256=review08.digest(reference_path),
                        historical_review_sha256=review08.digest(args.historical / "review.json"),
                        source_sha256=source_digests(reference), groups=GROUPS)
