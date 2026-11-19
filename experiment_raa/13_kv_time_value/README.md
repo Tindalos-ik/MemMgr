@@ -34,7 +34,7 @@ done
 CUDA_VISIBLE_DEVICES='' "$PYTHON" -m "$MOD.review" "$D" --tier cpu
 ```
 
-要测 eager 盘层，校准循环依次用 `recompute cpu ssd`，其余命令使用 `--tier ssd`。校准和评价目录按层级隔离，两个层级可以使用同一个冻结计划。每个对照组独立启动，使用空盘目录。中断的组保留原始证据；用新的阶段目录重新采集。
+要测 eager 盘层，校准循环依次用 `recompute cpu ssd`，其余命令使用 `--tier ssd`。校准和评价目录按层级隔离，两个层级可以使用同一个冻结计划。每个对照组独立启动，使用空盘目录。若有组中断，将未生成 `complete.json` 的组目录移出正式组路径，保留原始证据，并用原命令重采该组。
 
 ## 口径和适用范围
 
