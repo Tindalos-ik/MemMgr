@@ -22,6 +22,8 @@ from memmgr.short_term.config import local_path, transfer_config
 from memmgr.short_term.retention import RetentionProfile, filesystem_device, fit, retention_context
 
 from .historical import BLOCK_BYTES, PHASE, POLICIES, digest, read, rows, save, sha
+from .review import process_io, prometheus, verify_metrics
+from .ssd_evidence import replay as replay_ssd, verify_serial
 
 
 ssd = import_module("experiment_raa.07_kv_joint_ssd.run_ssd_joint")
@@ -111,6 +113,7 @@ def command(config, directory, port, policy, tier, profile):
         path = directory / "ssd"
         path.mkdir()
         options.update(ssd_root=str(path), ssd_bytes=ssd.SSD_BYTES)
+        argv[-2:-2] = ["--shutdown-timeout", "20"]
     transfer = transfer_config(dict(server, max_model_len=joint.MAX_MODEL_LEN, max_num_seqs=1, kv_cache=options), ROOT)
     argv[-1] = json.dumps(transfer)
     return argv
@@ -179,8 +182,14 @@ def capture(client, audit, previous, directory, index, config, tokens, tier):
     row = generate(client, tokens, config["seed"], tag)
     events = []
     deadline = time.monotonic() + 25
+    jobs = set()
     while True:
-        events.extend(available_events(audit))
+        for event in available_events(audit):
+            events.append(event)
+            if event["kind"] == "fs_submit":
+                jobs.add(event["job"])
+            elif event["kind"] == "fs_complete":
+                jobs.remove(event["job"])
         raw, counters = joint.metrics(client)
         delta = {key: counters[key] - previous.get(key, 0) for key in counters}
         counts = transfer_totals(events)
@@ -189,7 +198,7 @@ def capture(client, audit, previous, directory, index, config, tokens, tier):
                 and delta.get("vllm:kv_offload_store_bytes_total", 0) == counts["stored"] * BLOCK_BYTES
                 and delta.get("vllm:kv_offload_load_bytes_total", 0) == counts["loaded"] * BLOCK_BYTES
                 and external == counts["loaded"] * BLOCK and any(event["kind"] == "store" for event in events)
-                and (tier == "cpu" or (any(event["kind"] == "ssd_request_closed" for event in events)
+                and (tier == "cpu" or (not jobs and any(event["kind"] == "ssd_request_closed" for event in events)
                     and delta.get("vllm:kv_offload_tiering_read_bytes_total", 0) == counts["ssd_load"] * BLOCK_BYTES
                     and delta.get("vllm:kv_offload_tiering_write_bytes_total", 0) == counts["ssd_store"] * BLOCK_BYTES))):
             break
@@ -237,6 +246,18 @@ def inherited_lock(path):
     raise RuntimeError(f"Start each GPU service with flock -x {path}")
 
 
+def service_lock(process, fd):
+    """验证 process 继承 fd 对应的同一个打开文件，并保留 Linux 证据。"""
+    local = Path(f"/proc/self/fd/{fd}").stat()
+    remote = Path(f"/proc/{process.pid}/fd/{fd}").stat()
+    info = Path(f"/proc/{process.pid}/fdinfo/{fd}").read_text()
+    if ((local.st_dev, local.st_ino) != (remote.st_dev, remote.st_ino)
+            or not any(line.startswith("lock:") and {"FLOCK", "WRITE"} <= set(line.split())
+                       for line in info.splitlines())):
+        raise RuntimeError("vLLM did not inherit the shared exclusive GPU flock")
+    return dict(pid=process.pid, fd=fd, device=remote.st_dev, inode=remote.st_ino, fdinfo=info)
+
+
 def collect(args, config, plan, directory, profile):
     """启动一个服务，执行 args 指定的路径或策略，并在返回前等待进程停止。"""
     lock_fd = inherited_lock(ROOT / ".agent/kv-experiment-gpu.lock")
@@ -257,6 +278,7 @@ def collect(args, config, plan, directory, profile):
         try:
             with httpx.Client(base_url=f"http://127.0.0.1:{args.port}", timeout=120, trust_env=False) as client:
                 joint.ready(client, process, args.port, log_path)
+                save(directory / "gpu-lock.json", service_lock(process, lock_fd))
                 with ((directory / "audit.jsonl").open() as audit,
                       (directory / "requests.jsonl").open("x") as records,
                       (directory / "resources.jsonl").open("x") as resources):
@@ -295,15 +317,22 @@ def collect(args, config, plan, directory, profile):
                         raise RuntimeError(f"Service exited early or audit rolled over: {directory}")
         finally:
             if process.poll() is None:
-                os.killpg(process.pid, signal.SIGTERM)
+                if args.tier == "ssd":
+                    process.terminate()
+                else:
+                    os.killpg(process.pid, signal.SIGTERM)
                 try:
                     process.wait(timeout=30)
                 except subprocess.TimeoutExpired:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
+    if args.tier == "ssd":
+        shutdown = rows(directory / "audit.jsonl")[-1]
+        if shutdown["kind"] != "ssd_shutdown" or shutdown["success"] is not True:
+            raise RuntimeError(f"SSD engine did not drain before shutdown: {directory}")
     save(directory / "complete.json", dict(context=current, requests=index, arm=args.arm, stage=args.stage,
                                           evidence={name: sha(directory / name) for name in ("server.json", "audit.jsonl",
-                                                  "requests.jsonl", "resources.jsonl")}))
+                                                  "requests.jsonl", "resources.jsonl", "gpu-lock.json")}))
 
 
 def measure_probe(client, send, case, arm):
@@ -334,6 +363,7 @@ def calibrate(output, tier, plan):
     arms = ("recompute", "cpu", "ssd") if tier == "ssd" else ("recompute", "cpu")
     context = None
     samples = []
+    evidence = {}
     sources = {"calibration_plan": digest(plan["calibration"])}
     expected = {case["case"]: digest(case["tokens"]) for case in plan["calibration"]}
     for arm in arms:
@@ -347,16 +377,36 @@ def calibrate(output, tier, plan):
             if sha(directory / name) != expected_sha:
                 raise ValueError(f"Calibration evidence changed: {directory / name}")
             sources[str((directory / name).relative_to(output))] = expected_sha
-        observed = [row for row in rows(directory / "requests.jsonl") if row["phase"] == PHASE]
+        records = rows(directory / "requests.jsonl")
+        if tier == "ssd":
+            transfer = replay_ssd(directory, records)
+            before = prometheus(directory / "initial.prom")
+            for row in records:
+                after = prometheus(directory / f"{row['index']:04}.prom")
+                verify_metrics(row, before, after)
+                before = after
+            io = process_io(directory / "resources.jsonl")
+            probe_blocks = sum(row["blocks"] for row in records if row["phase"] == PHASE)
+            expected_reads = probe_blocks if arm == "ssd" else 0
+            if (transfer["full_ssd_chain_blocks"] != expected_reads
+                    or io["read_bytes"] < expected_reads * BLOCK_BYTES
+                    or io["write_bytes"] < sum(row["ssd_write_blocks"] for row in records[1:]) * BLOCK_BYTES):
+                raise ValueError(f"Calibration did not execute the requested native route: {arm}")
+            evidence[arm] = dict(chain=transfer, process_io=io, complete_sha256=sha(directory / "complete.json"))
+        observed = [row for row in records if row["phase"] == PHASE]
         if len(observed) != len(expected) or {row["case"]: row["prompt_sha256"] for row in observed} != expected:
             raise ValueError("Calibration probes do not match the independent frozen plan")
         for row in observed:
             row["ssd_write_seconds"] = row["prime_ssd_write_seconds"]
         samples.extend(observed)
+    if tier == "ssd":
+        verify_serial([item["chain"] for item in evidence.values()])
     profile = fit(samples, context, plan["calibration_prefixes"], sources)
     path = output / f"profile-{tier}.json"
     save(path, profile)
     RetentionProfile(path, context)
+    if tier == "ssd":
+        save(output / "review-ssd-calibration.json", dict(profile_sha256=sha(path), probes=len(expected), arms=evidence))
 
 
 def main():

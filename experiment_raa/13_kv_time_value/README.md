@@ -36,6 +36,8 @@ CUDA_VISIBLE_DEVICES='' "$PYTHON" -m "$MOD.review" "$D" --tier cpu
 
 要测 eager 盘层，校准循环依次用 `recompute cpu ssd`，其余命令使用 `--tier ssd`。校准和评价目录按层级隔离，两个层级可以使用同一个冻结计划。每个对照组独立启动，使用空盘目录。若有组中断，将未生成 `complete.json` 的组目录移出正式组路径，保留原始证据，并用原命令重采该组。
 
+已有 CPU 结果时保留 `D` 中的冻结 `plan.json` 和 `experiment.json`，直接运行 SSD 阶段。SSD 组把子进程继承的独占锁写入 `gpu-lock.json`。拟合前核对三臂逐 token、实机原始指标和从盘写完成、CPU 槽淘汰、盘读入槽到 GPU DMA 的同块链；复核证据为 `review-ssd-calibration.json`。`time_value` 评价额外从按时间排序的盘写完成事件复算每个已发布副本的成本分支，`review-ssd.json` 中保留能定位到原始作业和决策时点的样本。
+
 ## 口径和适用范围
 
 - 校准测 1、4、8、16 块、GPU 冷起点的连续前缀；同一个探测输入跨路径逐 token 校验。固定深度的累计收益使用服务端 TTFT 的配对差中位数，锚点之间由相邻累计差的斜率给出边际成本。写入使用已完成传输计时，每块取各深度的中位数。CPU、SSD 两种 profile 不能混用。

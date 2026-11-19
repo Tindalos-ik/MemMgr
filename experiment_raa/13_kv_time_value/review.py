@@ -12,6 +12,7 @@ from prometheus_client.parser import text_string_to_metric_families
 from memmgr.short_term.retention import RetentionProfile
 
 from .historical import BLOCK_BYTES, POLICIES, digest, read, rows, save, sha
+from .ssd_evidence import replay as replay_ssd, verify_serial
 
 
 TIMES = ("ttft_seconds", "client_ttft_seconds")
@@ -116,10 +117,9 @@ def group(path, config, expected, profile, tier, policy):
     marker = read(path / "complete.json")
     if marker["stage"] != "eval" or marker["arm"] != policy:
         raise ValueError(f"Not an evaluation group: {path}")
-    if profile is not None:
-        RetentionProfile(profile, marker["context"])
-    elif marker["context"]["tier"] != tier:
+    if marker["context"]["tier"] != tier:
         raise ValueError("Unexpected evaluation tier")
+    calibration = RetentionProfile(profile, marker["context"])
     for name, value in marker["evidence"].items():
         if sha(path / name) != value:
             raise ValueError(f"Evaluation evidence changed: {path / name}")
@@ -136,6 +136,9 @@ def group(path, config, expected, profile, tier, policy):
         if "request_id" in event:
             by_request[event["request_id"]].append(event)
     results = rows(path / "requests.jsonl")
+    ssd_evidence = None
+    if tier == "ssd":
+        ssd_evidence = replay_ssd(path, results, calibration if policy == "time_value" else None)
     if len(results) != marker["requests"] or len(by_request) != len(results):
         raise ValueError("Incomplete request audits")
     retention, evictions = Counter(), 0
@@ -163,6 +166,11 @@ def group(path, config, expected, profile, tier, policy):
     stats = dict(requests=len(results), totals=metrics, evicted_blocks=evictions, process_io=process_io(path / "resources.jsonl"),
                  warmup_ids=warmup_ids,
                  retention=dict(retention), timings={key: distribution(row[key] for row in results) for key in TIMES})
+    if ssd_evidence is not None:
+        if (stats["process_io"]["read_bytes"] < metrics["ssd_read_bytes"]
+                or stats["process_io"]["write_bytes"] < metrics["ssd_write_bytes"]):
+            raise ValueError("Linux process I/O is below native O_DIRECT bytes")
+        stats["ssd_evidence"] = ssd_evidence
     return results, stats, marker["context"]
 
 
@@ -181,6 +189,10 @@ def review(output, tier):
         raise ValueError("Incomparable device or runtime across policies")
     if any(stats[policy]["warmup_ids"] != stats[POLICIES[0]]["warmup_ids"] for policy in POLICIES[1:]):
         raise ValueError("Warmup token IDs differ across the policies")
+    if tier == "ssd":
+        calibration_arms = read(output / "review-ssd-calibration.json")["arms"]
+        verify_serial([entry["chain"] for entry in calibration_arms.values()] +
+                      [stats[policy]["ssd_evidence"] for policy in POLICIES])
     comparisons = {}
     for control, treatment in itertools.combinations(POLICIES, 2):
         pairs = list(zip(groups[control], groups[treatment], strict=True))
