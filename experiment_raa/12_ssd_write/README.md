@@ -8,6 +8,8 @@
 | 请求 | 同一条预热；07 的冻结 78 条（在 08 的 14 MiB learned 组无读回），08 的 50 条热点压力 |
 | 对照顺序 | 每份计划各两轮：`eager → on_evict`、`on_evict → eager`；各组独立进程与空盘目录 |
 
+实测数据见 [RESULTS.md](RESULTS.md)。
+
 ## 配置
 
 在服务的 `kv_cache` 中设置 `tier: "ssd"`、`batch_invariant: true`、`restore: "always"`，可用 `ssd_write` 选择时机：
@@ -30,7 +32,7 @@
 ```bash
 set -e
 OUT=.agent/kv-ssd-write/paired-12
-for group in {1..8}; do
+while [ ! -f "$OUT/complete.json" ]; do
   flock -x .agent/kv-experiment-gpu.lock .venv/bin/python \
     experiment_raa/12_ssd_write/run_ssd_write.py --output "$OUT"
 done

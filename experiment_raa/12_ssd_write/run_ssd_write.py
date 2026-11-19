@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 capacity = import_module("experiment_raa.08_kv_capacity.run_capacity")
 ssd, joint = capacity.ssd, capacity.joint
+gpu_lock = import_module("experiment_raa.12_ssd_write.gpu_lock")
 WORKLOADS = ("frozen-78", "pressure")
 MODES = ("eager", "on_evict")
 GROUPS = [(workload, epoch, mode) for workload in WORKLOADS
@@ -28,7 +29,7 @@ CPU_MIB = 14
 
 def source_digests():
     """记录本次运行所用 connector、启动器与冻结计划生成器的 SHA-256。"""
-    files = [*ROOT.glob("memmgr/short_term/*.py"), Path(__file__), Path(capacity.__file__),
+    files = [*ROOT.glob("memmgr/short_term/*.py"), Path(__file__), Path(gpu_lock.__file__), Path(capacity.__file__),
              Path(ssd.__file__), Path(joint.__file__)]
     return {str(path.relative_to(ROOT)): joint.digest(path) for path in sorted(files)}
 
@@ -64,8 +65,8 @@ def freeze(args):
                 gpu_bytes=joint.GPU_BYTES, cpu_bytes=CPU_MIB * 2**20, ssd_bytes=ssd.SSD_BYTES)
 
 
-def capture(args, directory, mode, plan, warmup):
-    """用 args 启动 directory 的独立服务，用 mode 回放 warmup 和 plan 并排空。"""
+def capture(args, directory, mode, plan, warmup, lock_fd):
+    """启动 directory 的独立服务，用 mode 回放 warmup 和 plan；lock_fd 随服务持有。"""
     warm = directory / "warmup"
     warm.mkdir()
     argv, cache = capacity.launch_args(args, directory, "ssd", "learned")
@@ -80,7 +81,7 @@ def capture(args, directory, mode, plan, warmup):
     log, audit_path = directory / "server.log", directory / "audit.jsonl"
     with log.open("x", encoding="utf-8") as stream:
         process = subprocess.Popen(argv, cwd=ROOT, env=os.environ | args.env, stdout=stream,
-                                   stderr=subprocess.STDOUT, start_new_session=True)
+                                   stderr=subprocess.STDOUT, start_new_session=True, pass_fds=(lock_fd,))
         try:
             with (httpx.Client(base_url=f"http://127.0.0.1:{args.port}", timeout=120, trust_env=False) as client,
                   (directory / "resources.jsonl").open("x", encoding="utf-8") as io_stream,
@@ -131,6 +132,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--port", type=int, default=18092)
     args = parser.parse_args()
+    lock_fd = gpu_lock.inherited_lock(ROOT / ".agent/kv-experiment-gpu.lock")
     for name in ("source", "pressure_source", "output"):
         setattr(args, name, ssd.local_path(getattr(args, name), ROOT))
     env_path = args.output / "environment.json"
@@ -155,7 +157,7 @@ def main():
         warmup = ssd.load(args.output / "plans/warmup.json")
         plan = ssd.load(args.output / ("plans/eval.json" if workload == "frozen-78" else "plans/pressure.json"))
         print(f"开始 {workload}/{epoch}/{mode}", flush=True)
-        capture(args, directory, mode, plan, warmup)
+        capture(args, directory, mode, plan, warmup, lock_fd)
         ssd.mark_complete(directory, workload=workload, epoch=epoch, mode=mode,
                           requests=len(plan), warmup_requests=len(warmup))
         print(f"完成 {workload}/{epoch}/{mode}", flush=True)
